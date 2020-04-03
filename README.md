@@ -10,3 +10,7 @@ keywords = {Microgrid, Energy planning, Robust optimization, Flexible commitment
 title = {{Robust energy trading and scheduling for microgrids based on the Contract Collaboration Problem}},
 year = {2020}
 }
+
+Instructions: 
+  Please read the file README.txt.
+  
