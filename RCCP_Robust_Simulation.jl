@@ -1,16 +1,16 @@
-# =================================
+# ===================================================================================
 # RCCP_Robust_Simulation.jl
-# RTCS Simulation based on scenarios.
-# =================================
+# For a given set of CCP model results, perform RTCS Simulation based on scenarios.
+# ===================================================================================
 
 using JuMP
-using Cbc
 using CSV
 using DataFrames
-#using DataArrays
-using CPLEX
 using JLD2, FileIO
+using Arrow
+using Dates
 import MathProgBase
+using CodecZlib
 
 # Include file reader and util functions
 include("RCCP_FileReader.jl")
@@ -25,31 +25,379 @@ include("RCCP_RTCS.jl")
 # Include RCCP Plot functions
 #include("RCCP_SimPlot.jl")
 
-function sim_heuristic()
-    # Heurística de tempo real. Opcoes:
-    # a) Olhando apenas o y: Dentro de cada subperíodo de tempo, olhar apenas os contratos que serão utilizados (disponíveis para o
-    #    período) e as demandas / ofertas de energia dos dispositivos. Com base nisso, compra-se ou vende-se energia por meio e por fora
-    #    dos contratos. Não se olha para as variáveis que dependem da incerteza.
-    # b) Olhando o y e as demais variáveis do robusto atreladas ao período t' : usa informações dos contratos utilizados e dos
-    #    percentuais e quantidades usados da bateria e dos demais dispositivos (variáveis q, r, g, etc.), fornecidos pela multiplicação dos
-    #    valores das variáveis retornados pelo robusto vezes o valor realizado de P para o período (obtido nos dados do cenário: soma dos
-    #    valores de P de cada microperíodo). Com esses dados, roda-se a heurística para decidir o quanto usar de cada um.
-    # c) Olhando o y, as demais variáveis do robusto e o conhecimento das situações de instantes passados.
+function process_individual_scenario(scenario_id, scenario, general_simulation_parameters, instance_simulation_parameters)
+    forecast_type = general_simulation_parameters["forecast-type"]
+    instance_as_dict = instance_simulation_parameters["instance_as_dict"]
+    test_name = instance_simulation_parameters["test_name"]
+    sim_strategy = instance_simulation_parameters["sim_strategy"]
+    model_policy = instance_simulation_parameters["model_policy"]
+    reoptimize = instance_simulation_parameters["reoptimize"]
+    scenario_filter = instance_simulation_parameters["scenario_filter"]
+    instance_name = instance_simulation_parameters["instance-name"]
+    time_limit = instance_simulation_parameters["time_limit"]
+    model = instance_simulation_parameters["model"]
+    verbose = instance_simulation_parameters["verbose"]
+    base_simulation_dir = instance_simulation_parameters["base_simulation_dir"]
+    simulation_log_dir = instance_simulation_parameters["simulation-log-dir"]
+    period_info = instance_as_dict["period"]
+    instance = instance_as_dict["instance"]
+    storage = instance_as_dict["storage"]
+    drivable = instance_as_dict["drivable"]
+    n_drivable_uncertain = instance_as_dict["n_drivable_uncertain"]
+    nbT, nbS, nbC, nbD, nbND, nbSt = obtain_instance_parameters(instance)
+    nbNDU = size(n_drivable_uncertain, 1)
+    T, S, C, D, ND, ST = obtain_instance_ranges(nbT, nbS, nbC, nbD, nbND, nbSt)
+    num_contracts = instance_as_dict["num_contracts"]
+    scenario_list = instance_as_dict["scenarios"]
+    nbScenarios = size(scenario_list, 1)
+    tid = Threads.threadid()
+    # Gamma parameter used by robust-budget model
+    Gamma_perc = instance_simulation_parameters["Gamma_perc"]
+    Gamma = (Gamma_perc * nbNDU * nbT) / 100.0
+    # Open a logfile for writing
+    simulation_log_dir = instance_simulation_parameters["simulation-log-dir"]
+    output_file_log = joinpath(normpath(simulation_log_dir), model * "_" * test_name * "_" * instance_name * "_thread_$(tid).log")
+    general_logger = open(output_file_log, "a+")
+    println(general_logger, "[Thread $(tid)] Processing scenario #$(scenario_id), # Scenarios = $(size(scenario_filter, 1))")
+    # Define a tracefile for writing
+    simulation_trace_dir = get_simulation_trace_dir(instance_simulation_parameters)
+    scenario_subpath = create_trace_scenario_filename(
+            model, Gamma_perc, test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
+    output_file_base = joinpath(normpath(simulation_trace_dir), scenario_subpath)
+    # Define a logfile for writing scenario trace data (textual format / debug)
+    scenario_file_log = output_file_base * ".log"
+    scenario_logger = open(scenario_file_log, "w+")
+    # Save other trace data (column format)
+    output_file_df = output_file_base * ".csv"
+    output_file_trace_arrow = output_file_base * ".arrow"
+    output_file_var_arrow = output_file_base * "_var.arrow"
+    # Create a new dataframe for this scenario
+    trace_df, var_df = create_empty_trace_dataframe()
+    y_model = nothing
+    opt_df = DataFrame()
+    sum_time_spent = 0
+    sum_reopt_time_spent = 0
+    total_processing_time = 0
+    trace_df_list = Array[]
+    # Run optimization models or obtain solution values if already stored in file
+    opt_df_t1 = obtain_robust_optimization_model_results(base_simulation_dir, test_name, model, instance_name,
+        instance_as_dict, time_limit, general_simulation_parameters, general_logger)
+    if model == "robust-budget"  # Retrieve model result for a specific value of budget Gamma
+        opt_df_t1 = opt_df_t1[(opt_df_t1[!, :GammaPerc] .== Gamma_perc), :]
+        if nrow(opt_df_t1) == 0
+            println(general_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for budget model Gamma% = $(Gamma_perc).")
+            println(scenario_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for budget model Gamma% = $(Gamma_perc).")
+            println("[Thread $(tid)] ERROR: No existing optimal model solution found for budget model Gamma% = $(Gamma_perc).")
+        end
+    elseif nrow(opt_df_t1) == 0
+        println(general_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for the requested model.")
+        println(scenario_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for the requested model.")
+        println("[Thread $(tid)] ERROR: No existing optimal model solution found for the requested model.")
+    end
+    flush(stdout)
+	flush(scenario_logger)
+	flush(general_logger)
+    try
+        if verbose println("===========================================================================") end
+        if verbose println(scenario_logger, "===========================================================================") end
+        if verbose println("[Thread $(tid)] Scenario #$(scenario_id), # Scenarios = $(size(scenario_filter, 1))") end
+        if verbose println(scenario_logger, "Scenario #$(scenario_id), # Scenarios = $(size(scenario_filter, 1))") end
+        if verbose println(general_logger, "Scenario #$(scenario_id), # Scenarios = $(size(scenario_filter, 1))") end
 
+        # Calculate the initial battery charge for each battery in ST
+        initial_r_t = zeros(Float64, nbSt)
+        for s in ST
+            initial_r_t[s] = storage[s,:uInit]
+        end
+        previous_r_td_model = deepcopy(initial_r_t)
+        acc_cost_model = 0.0
+        previous_batt_levels_model = zeros(Float64, nbSt)
+        # Generate the array of drivable devices previous accumulated charge value
+        previous_drivable_charge_model = zeros(Float64, nbD)
+        scenario_processing_start_time = time_ns()
+        for t in 1:nbT   # For each time period t
+            Gamma = (Gamma_perc * nbNDU * (nbT - t + 1)) / 100.0
+            if verbose println(scenario_logger, "===========================================================================") end
+            if verbose
+                println(scenario_logger, "(t) Period #$(t) of $(nbT)")
+                flush(stdout)
+            end
+            period_size = period_info[!, :size][t]
+            #det_value = 0
+            elapsed_time_model = 0.0
+            if (!reoptimize) || (t == 1)  # Use model solution starting with t = 1
+                if hasproperty(opt_df_t1, :ObjValue)
+                    model_value_for_period = opt_df_t1[1, :ObjValue]
+                    status_opt = opt_df_t1[1, :Optimal]
+                    gap_opt = opt_df_t1[1, :RelGap]
+                else
+                    model_value_for_period = opt_df_t1[1, :RobValue]
+                    status_opt = opt_df_t1[1, :RobOptimal]
+                    gap_opt = 0.02
+                end
+                if t == 1
+                    if hasproperty(opt_df_t1, :ModelTime)
+                        model_opt_time_spent = opt_df_t1[1, :ModelTime]
+                    else
+                        model_opt_time_spent = opt_df_t1[1, :RobTime]
+                    end
+                else
+                    model_opt_time_spent = 0.0
+                end
+                model_solution = read_variables_from_solution_df(model, opt_df_t1, 1, instance, num_contracts, nbNDU)
+                # Store a copy of initial model results (t = 1) in this scenario dataframe
+                opt_df = store_optimization_results_in_dataframe(model, instance_name, instance_as_dict, scenario_id, t, model_value_for_period,
+                                                        model_solution, model_opt_time_spent, status_opt, gap_opt, general_logger, Gamma_perc, Gamma)
+                # Fix the contracts from initial robust solution for t = 1 (y)
+                y_model = model_solution["y"]
+            else   # Use model solution starting with t = t'
+                if model == "deterministic"
+                    # Reoptimize the Deterministic RCCP Model
+                    t1 = time_ns()  # ******************** measure start time
+                    model_value_reopt, model_solution_reopt, solve_time_reopt, status_reopt, gap_reopt =
+                            re_optimize_deterministic(instance_as_dict, time_limit, general_simulation_parameters, t, y_model,
+                                previous_batt_levels_model, previous_drivable_charge_model, general_logger)
+                    model_value_for_period = model_value_reopt
+                    model_opt_time_spent = solve_time_reopt
+                    model_solution = model_solution_reopt
+                    elapsed_time_det = time_ns() - t1   # ****************** stop time
+                else
+                    # TODO Try to use another strategy for budget of uncertainty when re-optimizing the robust model
+                    # e.g., considering the number of deviations observed so far.
+                    # Reoptimize the Robust RCCP Model
+                    t1 = time_ns()  # ******************** measure start time
+                    model_value_reopt, model_solution_reopt, solve_time_reopt, status_reopt, gap_reopt =
+                            re_optimize_robust(model, instance_as_dict, time_limit, general_simulation_parameters, t, y_model,
+                            previous_batt_levels_model, previous_drivable_charge_model, general_logger, Gamma)
+                    model_value_for_period = model_value_reopt
+                    model_opt_time_spent = solve_time_reopt
+                    model_solution = model_solution_reopt
+                    elapsed_time_rob = time_ns() - t1  # ******************* stop time
+                end
+                if status_reopt == false && t > 1   # FIXME workaround for infeasible reopt model result
+                    # Read solutions from time period t = 1
+                    model_solution = read_variables_from_solution_df(model, opt_df_t1, 1, instance, num_contracts, nbNDU)
+                    if hasproperty(opt_df_t1, :ObjValue)
+                        model_value_reopt = opt_df_t1[1, :ObjValue]
+                    else
+                        model_value_reopt = opt_df_t1[1, :RobValue]
+                    end
+                    status_reopt = true
+                    println("WARN: reusing rob solution from first period (t = 1), since current solution is INFEASIBLE.")
+                    flush(stdout)
+                end
+                opt_df = vcat(opt_df, store_optimization_results_in_dataframe(model, instance_name, instance_as_dict, scenario_id, t, model_value_reopt,
+                                                        model_solution, solve_time_reopt, status_reopt, gap_reopt, general_logger, Gamma_perc, Gamma))
+                if hasproperty(opt_df, :ObjValue)
+                    model_value_for_period = opt_df[t, :ObjValue]
+                else
+                    model_value_for_period = opt_df[t, :RobValue]
+                end
+                model_opt_time_spent = opt_df[t, :ModelTime]
+                model_solution = read_variables_from_solution_df(model, opt_df, t, instance, num_contracts, nbNDU)
+            end
+            P_hat_t = zeros(Float64, nbNDU)  # P_hat for a whole time period t
+            q_t_model = zeros(Float64, num_contracts[t])
+
+            # v2 : use P_hat_t = avg_P_hat_t for uncertain load values
+            # Obtain average values for uncertain non-drivable devices load, such that P = (Pmin + Pmax)/2
+            # TODO Instead of using average values, apply prediction for uncertain devices (Machine Learning)
+            P_hat_t = zeros(Float64, nbNDU)  # P_hat for a whole time period t
+            if !isempty(n_drivable_uncertain)
+                if occursin("ml", forecast_type)
+                    # TODO Implement Machine Learning RTCS forecast, e.g., forecast_type == "ml-sliding-window"
+                    for i in 1:size(n_drivable_uncertain, 1)
+                        power = (n_drivable_uncertain[i, :Pmin][t] + n_drivable_uncertain[i, :Pmax][t]) / 2.0
+                        P_hat_t[i] = power
+                    end
+                else
+                    if forecast_type != "average"
+                        println(general_logger, "\nWARN: Calculating average load values for uncertain non-drivable devices.")
+                        println("[CCP Simulator] ERROR: Unknown forecast_type. Assuming average forecast type!")
+                        flush(stdout)
+                    end
+                    for i in 1:size(n_drivable_uncertain, 1)
+                        power = (n_drivable_uncertain[i, :Pmin][t] + n_drivable_uncertain[i, :Pmax][t]) / 2.0
+                        P_hat_t[i] = power
+                    end
+                end
+            end
+
+            for d in 1:period_size  # For each d in period dt
+                if verbose println(scenario_logger, "===========================================================================") end
+                if verbose println(scenario_logger, "(d) Microperiod #$(d) of $(period_size) (t = $(t))") end
+                t1 = time_ns()  # **************** measure start time
+                P_hat_td = Float64[]
+                for unds_matrix in scenario
+                    push!(P_hat_td, unds_matrix[t][d])  # P_hat_td[s] for s in NDU
+                end
+                # v2 : use P_hat_t = avg_P_hat_t for uncertain load values
+                #for s in 1:nbNDU  # Obtain the P_hat matrix with the sum for the whole period t
+                #    P_hat_t[s] += P_hat_td[s]
+                #end
+                unds_id = 1
+                time_spent = 0.0
+                # run RTCS and obtain variable values for the current time unit d, period t
+                if verbose println(scenario_logger, "\n  $(model)   R T C S") end
+                t1 = time_ns()  # *********************** measure start time
+                previous_q_t_model = deepcopy(q_t_model)
+                q_td, x_td, e_td, r_td, g_td, h_td, gap, cost = rtcs(t, d, period_size, sim_strategy,
+                                                            model_policy, instance_as_dict, P_hat_t, P_hat_td,
+                                                            y_model, model, model_solution, previous_r_td_model,
+                                                            previous_drivable_charge_model, previous_q_t_model,
+                                                            scenario_logger, verbose)
+                previous_r_td_model = deepcopy(r_td)
+                for c in 1:num_contracts[t]
+                    q_t_model[c] += q_td[c]
+                end
+                # For a strange reason, cost is being returned as a one-element array, fix this
+                cost = fix_cost_variable_type(cost)
+                acc_cost_model += cost
+                # IMPORTANT : process drivable devices previous accumulated charge value
+                for s in D
+                    previous_drivable_charge_model[s] += (drivable[s,:pORc][t] / period_size) * x_td[s]
+                end
+                if verbose println(scenario_logger, "    ACCUMULATED COST                    : $(acc_cost_model)") end
+                elapsed_time_model += (time_ns() - t1)  # ********************** stop time
+                push!(trace_df, [model, Gamma_perc, Gamma, sim_strategy, reoptimize, model_policy, forecast_type, scenario_id,
+                    t, d, model_value_for_period, (d == 1) ? model_opt_time_spent : 0.0,
+                    e_td, gap, cost, elapsed_time_model/1.0e9])
+                push!(var_df, [model, Gamma_perc, Gamma, sim_strategy, reoptimize, model_policy, forecast_type, scenario_id, t, d,
+                    q_td, x_td, e_td, r_td, g_td, h_td])
+
+                sum_time_spent += model_opt_time_spent
+                # FIXME investigate reopt time calculation
+                sum_reopt_time_spent += model_opt_time_spent
+            end
+            previous_batt_levels_model = deepcopy(previous_r_td_model)
+        end
+        scenario_end_processing_time = time_ns()
+        scenario_processing_time = (scenario_end_processing_time - scenario_processing_start_time) / 1.0e9
+        total_processing_time += scenario_processing_time
+        println(scenario_logger, "\n===========================================================================")
+        println(scenario_logger, " Total processing time : $(scenario_processing_time)")
+        # TRACE FILE: Create an output file to write the dataframe to disk
+        println(general_logger, "\n[Thread $(tid)] Saving trace CSV file to $(output_file_df)...")
+        CSV.write(output_file_df, trace_df)
+        Arrow.write(output_file_trace_arrow, trace_df; compress=:zstd, ntasks=2)
+        Arrow.write(output_file_var_arrow, var_df; compress=:zstd, ntasks=2)
+    catch e
+        bt = catch_backtrace()
+        msg = sprint(showerror, e, bt)
+        println(msg)
+        println(general_logger, "[Thread $(tid)] Exception thrown: \n" * msg)
+    finally
+        # Close the scenario log file
+        close(scenario_logger)
+        # Move the scenario log text file and scenario csv trace file to a zip file to save disk space
+        simulation_zip_dir = get_simulation_zip_dir(general_simulation_parameters, instance_name)
+        output_file_base = joinpath(normpath(simulation_zip_dir), create_trace_scenario_filename(
+                model, Gamma_perc, test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id))
+        output_file_zip = output_file_base * ".zip"
+        move_files_to_zip_archive(output_file_zip, [scenario_file_log, output_file_df, output_file_var_arrow, output_file_trace_arrow], general_logger)
+        println(general_logger, "[Thread $(tid)] Done processing scenario #$(scenario_id), # Scenarios = $(size(scenario_filter, 1)).")
+        flush(general_logger)
+        if verbose
+            println("[Thread $(tid)] Done processing scenario #$(scenario_id), # Scenarios = $(size(scenario_filter, 1)).")
+			flush(stdout)
+        end
+        flush(stdout)
+        flush(general_logger)
+    end
+    close(general_logger)
+    return opt_df
 end
 
+# Based on a list of scenarios to be simulated, identifies for which scenarios simulation can be skipped, for
+# having already being executed.
+function process_existing_scenario_runs(simulation_args, run_scenario_list, model, Gamma_perc, test_name, instance_name, sim_strategy,
+        model_policy, reoptimize)
+    # Define the path where simulation trace is written on disk
+    simulation_log_dir = get_simulation_zip_dir(simulation_args, instance_name)
+    println("Looking for existing simulations in folder $(simulation_log_dir)...")
+    filtered_scenario_id_list = Int64[]
+    reuse_scenario_id_list = Int64[]
+    for (scenario_id, scenario) in run_scenario_list  # For each scenario
+        scenario_subpath = create_trace_scenario_filename(
+                model, Gamma_perc, test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
+        output_file_base = joinpath(normpath(simulation_log_dir), scenario_subpath)
+        output_file_trace_zip = output_file_base * ".zip"
+	output_file_trace_arrow = scenario_subpath * ".arrow"
+        # If both arrow files exist, skips the execution of this scenario
+        if isfile(output_file_trace_zip)
+	    found = false
+            try
+	    	r = ZipFile.Reader(output_file_trace_zip)
+		for f in r.files
+			if GetFileExtension(f.name) == ".arrow" && (f.name == output_file_trace_arrow)
+				temp_df = DataFrame(Arrow.Table(f))
+				if nrow(temp_df) > 0
+					push!(reuse_scenario_id_list, scenario_id)
+					found = true
+				end
+				break
+			end
+		end
+            catch exc
+	    	println("Error reading zip trace file: $(exc).")
+            end
+	    if !found
+		push!(filtered_scenario_id_list, scenario_id)
+	    end
+        else
+            push!(filtered_scenario_id_list, scenario_id)
+        end
+    end
+    println("Reusing simulation for scenarios: $(reuse_scenario_id_list)")
+	flush(stdout)
+    if size(filtered_scenario_id_list, 1) > 0
+        new_run_scenario_list = [x for x in run_scenario_list if (x[1] in filtered_scenario_id_list)]
+        new_run_scenario_ids = [x[1] for x in run_scenario_list if (x[1] in filtered_scenario_id_list)]
+        return new_run_scenario_list, new_run_scenario_ids
+    else
+        return [], []
+    end
+end
+
+# Heurística de tempo real. Opcoes:
+# a) Olhando apenas o y: Dentro de cada subperíodo de tempo, olhar apenas os contratos que serão utilizados (disponíveis para o
+#    período) e as demandas / ofertas de energia dos dispositivos. Com base nisso, compra-se ou vende-se energia por meio e por fora
+#    dos contratos. Não se olha para as variáveis que dependem da incerteza.
+# b) Olhando o y e as demais variáveis do robusto atreladas ao período t' : usa informações dos contratos utilizados e dos
+#    percentuais e quantidades usados da bateria e dos demais dispositivos (variáveis q, r, g, etc.), fornecidos pela multiplicação dos
+#    valores das variáveis retornados pelo robusto vezes o valor realizado de P para o período (obtido nos dados do cenário: soma dos
+#    valores de P de cada microperíodo). Com esses dados, roda-se a heurística para decidir o quanto usar de cada um.
+# c) Olhando o y, as demais variáveis do robusto e o conhecimento das situações de instantes passados.
 # Reoptimize: Opções de execução da simulação:
 # - Sem re-otimização: roda-se o robusto apenas na primeira vez e a cada instante t' utiliza-se os valores das variáveis por ele
 #   retornadas, multiplicando-se os valores pelas realizações do parâmetro incerto P_hat.
 # - Com re-otimização: "Solve the Robust Model starting from t' "roda-se novamente o robusto a cada instante t' como se esse fosse
 #   o primeiro período de tempo do problema, fixando as variáveis y. As informações correspondentes aos períodos que já passaram
 #   são ignoradas.
-function simulate(instance_as_dict, test_name, instance_name, output_path, sim_strategy, model_policy, time_limit, cplex_old,
-        general_logger, scenario_filter = Int64[], reoptimize = false, verbose = true)
+# Main RTCS simulation function
+function simulate(general_simulation_parameters, instance_simulation_parameters, general_logger)
     println("\nNew Simulation")
+    instance_as_dict = instance_simulation_parameters["instance_as_dict"]
+    test_name = instance_simulation_parameters["test_name"]
+    sim_strategy = instance_simulation_parameters["sim_strategy"]
+    model_policy = instance_simulation_parameters["model_policy"]
+    reoptimize = instance_simulation_parameters["reoptimize"]
+    scenario_filter = instance_simulation_parameters["scenario_filter"]
+    instance_name = instance_simulation_parameters["instance-name"]
+    base_simulation_dir = instance_simulation_parameters["base_simulation_dir"]
+    model = instance_simulation_parameters["model"]
+    simulation_nthreads = general_simulation_parameters["simulation-nthreads"]
+    forecast_type = general_simulation_parameters["forecast-type"]
+    resume = general_simulation_parameters["resume"]
+    Gamma_perc = instance_simulation_parameters["Gamma_perc"]
+    println("Resume simulations? $(resume)")
     println("Simulation strategy is $(sim_strategy)")
     println("Re-optimization is enabled? $(reoptimize)")
-    output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "trace"])
+    println("RTCS forecast type is: $(forecast_type)")
+    println("Number of simulation threads: $(simulation_nthreads)")
+    # Obtain instance data
+    println("Obtaining instance data...")
+    flush(stdout)
     period_info = instance_as_dict["period"]
     instance = instance_as_dict["instance"]
     storage = instance_as_dict["storage"]
@@ -64,361 +412,156 @@ function simulate(instance_as_dict, test_name, instance_name, output_path, sim_s
     if nbScenarios == 0
         println("No scenarios found! Aborting simulation.")
         println(general_logger, "No scenarios found! Aborting simulation.\n")
+        flush(stdout)
         return [0.0, 0.0, zeros(Int64, nbC)]
     end
     if size(scenario_filter, 1) > 0
-        println(general_logger, "Scenario filter is ENABLED. Filter = $(scenario_filter)")
-        println("Scenario filter is ENABLED. Filter = $(scenario_filter)")
+        println(general_logger, "Scenario filter is ENABLED. # Scenarios = $(size(scenario_filter, 1))")
+        println("Scenario filter is ENABLED. # Scenarios = $(size(scenario_filter, 1))")
+        flush(stdout)
     end
-    sum_time_spent = 0
-    sum_reopt_time_spent = 0
-    trace_df_list = Array[]
 
-    # Run optimization models or obtain solution values if already stored in file
-    opt_df = obtain_robust_optimization_model_results(output_path, test_name,
-        instance_name, instance_as_dict, time_limit, cplex_old, general_logger)
-    # Fix the contracts from initial robust solution for t = 1 (y)
-    y_rob = opt_df[1, :RobSolution]
-    y_det = opt_df[1, :DetSolution]
-
-    scenario_id = -1
-    total_processing_time = 0.0
-    for scenario in scenario_list  # For each scenario in instance file
-        scenario_id += 1
-        println(general_logger, "Processing scenario #$(scenario_id) of $(nbScenarios)...")
-        if size(scenario_filter, 1) > 0 && !(scenario_id in scenario_filter)
-            println(general_logger, "Skipping scenario #$(scenario_id) of $(nbScenarios) due to filter.")
-            continue
-        end
-        # Define a logfile for writing
-        output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "log", instance_name])
-        scenario_subpath = create_trace_scenario_filename(
-                test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
-        output_file_base = joinpath(normpath(output_path), scenario_subpath)
-        output_file_log = output_file_base * ".log"
-        scenario_logger = open(output_file_log, "w+")
-        # Define a tracefile for writing
-        output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "trace", instance_name])
-        output_file_base = joinpath(normpath(output_path), scenario_subpath)
-        output_file_df = output_file_base * ".csv"
-        output_file_jld2 = output_file_base * ".jld2"
-        # Create a new dataframe for this scenario
-        trace_df, var_df = create_empty_trace_dataframe()
-        try
-            if verbose println("===========================================================================") end
-            if verbose println(scenario_logger, "===========================================================================") end
-            if verbose println("Scenario #$(scenario_id) of $(nbScenarios)") end
-            if verbose println(scenario_logger, "Scenario #$(scenario_id) of $(nbScenarios)") end
-            if verbose println(general_logger, "Scenario #$(scenario_id) of $(nbScenarios)") end
-
-            # Calculate the initial battery charge for each battery in ST
-            initial_r_t = zeros(Float64, nbSt)
-            for s in ST
-                initial_r_t[s] = storage[s,:uInit]
-            end
-            previous_r_td_det = copy(initial_r_t)
-            previous_r_td_rob = copy(initial_r_t)
-            acc_cost_det = 0.0
-            acc_cost_rob = 0.0
-            previous_batt_levels_det = zeros(Float64, nbSt)
-            previous_batt_levels_rob = zeros(Float64, nbSt)
-            # Generate the array of drivable devices previous accumulated charge value
-            previous_drivable_charge_det = zeros(Float64, nbD)
-            previous_drivable_charge_rob = zeros(Float64, nbD)
-            scenario_processing_start_time = time_ns()
-            for t in 1:nbT   # For each time period t
-                if verbose println(scenario_logger, "===========================================================================") end
-                if verbose println(scenario_logger, "(t) Period #$(t) of $(nbT)") end
-                period_size = period_info[:size][t]
-                #det_value = 0
-                elapsed_time_det = 0.0
-                elapsed_time_rob = 0.0
-                if (!reoptimize) || (t == 1)  # Use model solution starting with t = 1
-                    det_value_for_period = opt_df[1, :DetValue]
-                    rob_value_for_period = opt_df[1, :RobValue]
-                    if t == 1
-                        det_opt_time_spent = opt_df[1, :DetTime]
-                        rob_opt_time_spent = opt_df[1, :RobTime]
-                    else
-                        det_opt_time_spent = 0.0
-                        rob_opt_time_spent = 0.0
-                    end
-                    det_solution, rob_solution = read_variables_from_solution_df(opt_df, 1)
-                else   # Use model solution starting with t = t'
-                    # Reoptimize the Deterministic RCCP Model
-                    t1 = time_ns()  # ******************** measure start time
-                    det_value_reopt, det_solution_reopt, det_solve_time_reopt, status_det_reopt =
-                            re_optimize_deterministic(instance_as_dict, time_limit, cplex_old, t, y_det,
-                                previous_batt_levels_det, previous_drivable_charge_det, general_logger)
-                    det_value_for_period = det_value_reopt
-                    det_opt_time_spent = det_solve_time_reopt
-                    det_solution = det_solution_reopt
-                    elapsed_time_det = time_ns() - t1   # ****************** stop time
-                    # Read solutions from previous time period (t - 1)
-                    det_solution_tminus1, rob_solution_tminus1 = read_variables_from_solution_df(opt_df, t - 1)
-                    if status_det_reopt == false && t > 1   # FIXME workaround for infeasible reopt model result
-                        det_value_reopt = opt_df[t - 1, :DetValue]
-                        det_solution_reopt = det_solution_tminus1
-                        status_det_reopt = true
-                        println("WARN: reusing det solution from previous period (t - 1), since current solution is INFEASIBLE.")
-                    end
-                    # Reoptimize the Robust RCCP Model
-                    t1 = time_ns()  # ******************** measure start time
-                    rob_value_reopt, rob_solution_reopt, rob_solve_time_reopt, status_rob_reopt =
-                            re_optimize_robust(instance_as_dict, time_limit, cplex_old, t, y_rob,
-                            previous_batt_levels_rob, previous_drivable_charge_rob, general_logger)
-                    rob_value_for_period = rob_value_reopt
-                    rob_opt_time_spent = rob_solve_time_reopt
-                    rob_solution = rob_solution_reopt
-                    elapsed_time_rob = time_ns() - t1  # ******************* stop time
-                    if status_rob_reopt == false && t > 1   # FIXME workaround for infeasible reopt model result
-                        rob_value_reopt = opt_df[t - 1, :RobValue]
-                        rob_solution_reopt = rob_solution_tminus1
-                        status_rob_reopt = true
-                        println("WARN: reusing rob solution from previous period (t - 1), since current solution is INFEASIBLE.")
-                    end
-                    store_optimization_results_in_dataframe(instance_name, instance_as_dict, opt_df, scenario_id, t, det_value_reopt,
-                                                            det_solution_reopt, det_solve_time_reopt, status_det_reopt,
-                                                            rob_value_reopt, rob_solution_reopt, rob_solve_time_reopt, status_rob_reopt,
-                                                            general_logger)
-                    det_value_for_period = opt_df[t, :DetValue]
-                    rob_value_for_period = opt_df[t, :RobValue]
-                    det_opt_time_spent = opt_df[t, :DetTime]
-                    rob_opt_time_spent = opt_df[t, :RobTime]
-                    det_solution, rob_solution = read_variables_from_solution_df(opt_df, t)
-                end
-                P_hat_t = zeros(Float64, nbNDU)  # P_hat for a whole time period t
-                q_t_det = zeros(Float64, num_contracts[t])
-                q_t_rob = zeros(Float64, num_contracts[t])
-
-                # v2 : use P_hat_t = avg_P_hat_t for uncertain load values
-                # Obtain average values for uncertain non-drivable devices load, such that P = (Pmin + Pmax)/2
-                P_hat_t = zeros(Float64, nbNDU)  # P_hat for a whole time period t
-                if !isempty(n_drivable_uncertain)
-                    println(general_logger, "\nNOTE: Calculating average load values for uncertain non-drivable devices.")
-                    for i in 1:size(n_drivable_uncertain, 1)
-                        power = (n_drivable_uncertain[i, :Pmin][t] + n_drivable_uncertain[i, :Pmax][t]) / 2.0
-                        P_hat_t[i] = power
-                    end
-                end
-
-                for d in 1:period_size  # For each d in period dt
-                    if verbose println(scenario_logger, "===========================================================================") end
-                    if verbose println(scenario_logger, "(d) Microperiod #$(d) of $(period_size) (t = $(t))") end
-                    t1 = time_ns()  # **************** measure start time
-                    P_hat_td = Float64[]
-                    for unds_matrix in scenario
-                        push!(P_hat_td, unds_matrix[t][d])  # P_hat_td[s] for s in NDU
-                    end
-                    # v2 : use P_hat_t = avg_P_hat_t for uncertain load values
-                    #for s in 1:nbNDU  # Obtain the P_hat matrix with the sum for the whole period t
-                    #    P_hat_t[s] += P_hat_td[s]
-                    #end
-                    unds_id = 1
-                    time_spent = 0.0
-                    # run RTCS and obtain variable values for the current time unit d, period t
-                    if verbose println(scenario_logger, "\n  DETERMINISTIC   R T C S") end
-                    previous_q_t_det = copy(q_t_det)
-                    q_td, x_td, e_td, r_td, g_td, h_td, gap, cost = rtcs(t, d, period_size, sim_strategy,
-                                                                model_policy, instance_as_dict, P_hat_t, P_hat_td,
-                                                                y_det, "deterministic", det_solution, previous_r_td_det,
-                                                                previous_drivable_charge_det, previous_q_t_det,
-                                                                scenario_logger, verbose)
-                    previous_r_td_det = copy(r_td)
-                    for c in 1:num_contracts[t]
-                        q_t_det[c] += q_td[c]
-                    end
-                    # For a strange reason, cost is being returned as a one-element array, fix this
-                    cost = fix_cost_variable_type(cost)
-                    acc_cost_det += cost
-                    # IMPORTANT : process drivable devices previous accumulated charge value
-                    for s in D
-                        previous_drivable_charge_det[s] += (drivable[s,:pORc][t] / period_size) * x_td[s]
-                    end
-                    if verbose println(scenario_logger, "    ACCUMULATED COST                    : $(acc_cost_det)") end
-                    elapsed_time_det += (time_ns() - t1)  # ********************** stop time
-                    push!(trace_df, ["Deterministic", sim_strategy, reoptimize, model_policy, scenario_id,
-                        t, d, det_value_for_period, rob_value_for_period, (d == 1) ? det_opt_time_spent : 0.0,
-                        e_td, gap, cost, elapsed_time_det/1.0e9])
-                    push!(var_df, ["Deterministic", sim_strategy, reoptimize, model_policy, scenario_id,
-                        t, d,
-                        q_td, x_td, e_td, r_td, g_td, h_td])
-
-
-                    if verbose println(scenario_logger, "\n  ROBUST   R T C S") end
-                    t1 = time_ns()  # *********************** measure start time
-                    previous_q_t_rob = copy(q_t_rob)
-                    q_td, x_td, e_td, r_td, g_td, h_td, gap, cost = rtcs(t, d, period_size, sim_strategy,
-                                                            model_policy, instance_as_dict, P_hat_t, P_hat_td,
-                                                            y_rob, "robust", rob_solution, previous_r_td_rob,
-                                                            previous_drivable_charge_rob, previous_q_t_rob,
-                                                            scenario_logger, verbose)
-                    previous_r_td_rob = copy(r_td)
-                    for c in 1:num_contracts[t]
-                        q_t_rob[c] += q_td[c]
-                    end
-
-                    # For a strange reason, cost is being returned as a one-element array, fix this
-                    cost = fix_cost_variable_type(cost)
-                    acc_cost_rob += cost
-                    # IMPORTANT : process drivable devices previous accumulated charge value
-                    for s in D
-                        previous_drivable_charge_rob[s] += (drivable[s,:pORc][t] / period_size) * x_td[s]
-                    end
-                    if verbose println(scenario_logger, "    ACCUMULATED COST                    : $(acc_cost_rob)") end
-                    elapsed_time_rob += (time_ns() - t1)  # ********************** stop time
-                    push!(trace_df, ["Robust", sim_strategy, reoptimize, model_policy, scenario_id,
-                        t, d, det_value_for_period, rob_value_for_period, (d == 1) ? rob_opt_time_spent : 0.0,
-                        e_td,
-                        gap, cost, elapsed_time_rob/1.0e9])
-                    push!(var_df, ["Robust", sim_strategy, reoptimize, model_policy, scenario_id,
-                        t, d,
-                        q_td, x_td, e_td, r_td, g_td,
-                        h_td])
-                    sum_time_spent += det_opt_time_spent + rob_opt_time_spent
-                    sum_reopt_time_spent += det_opt_time_spent + rob_opt_time_spent
-                end
-                previous_batt_levels_det = copy(previous_r_td_det)
-                previous_batt_levels_rob = copy(previous_r_td_rob)
-            end
-            scenario_end_processing_time = time_ns()
-            scenario_processing_time = (scenario_end_processing_time - scenario_processing_start_time) / 1.0e9
-            total_processing_time += scenario_processing_time
-            println(scenario_logger, "\n===========================================================================")
-            println(scenario_logger, " Total processing time : $(scenario_processing_time)")
-            # TRACE FILE: Create an output file to write the dataframe to disk
-            println(general_logger, "\nSaving trace CSV file to $(output_file_df)...")
-            CSV.write(output_file_df, trace_df)
-            @save output_file_jld2 trace_df var_df
-            #push!(trace_df_list, trace_df)
-        catch e
-            bt = catch_backtrace()
-            msg = sprint(showerror, e, bt)
-            println(msg)
-            println(general_logger, "Exception thrown: \n" * msg)
-        finally
-            # Close the log file
-            close(scenario_logger)
-            flush(general_logger)
-            # Move the scenario log text file and scenario csv trace file to a zip file to save disk space
-            output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "zip", instance_name])
-            output_file_base = joinpath(normpath(output_path), create_trace_scenario_filename(
-                    test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id))
-            output_file_zip = output_file_base * ".zip"
-            move_files_to_zip_archive(output_file_zip, [output_file_log, output_file_df, output_file_jld2])
-        end
+    scenario_start_processing_time = time_ns()
+    # TODO Check for existing simulations of scenario_list (reuse existing results)
+    run_scenario_list = []
+    run_scenario_ids = []
+    if size(scenario_filter, 1) > 0
+        run_scenario_list = [x for x in enumerate(scenario_list) if (x[1] in scenario_filter)]
+        run_scenario_ids = [x[1] for x in enumerate(scenario_list) if (x[1] in scenario_filter)]
+    else
+        run_scenario_list = [x for x in enumerate(scenario_list)]
+        run_scenario_ids = [x[1] for x in enumerate(scenario_list)]
     end
-    save_optimization_results_dataframe_to_file(output_path, test_name, instance_name, opt_df, general_logger)
-    # Dados a serem armazenados nas simulações para análise futura (e.g. box plot):
-    #    - Custo da solução (determinístico x robusto)
-    #    - Quantidade de energia comprada fora do contrato
-    #    - Nível na bateria em cada instante de tempo
-    #    - Tempo gasto para rodar o PPL com a re-otimização.
-    return trace_df_list, total_processing_time
+    if resume
+        println("Resume simulations is ENABLED. Reusing existing simulations.")
+        run_scenario_list, run_scenario_ids = process_existing_scenario_runs(general_simulation_parameters, run_scenario_list, model, Gamma_perc, test_name,
+            instance_name, sim_strategy, model_policy, reoptimize)
+    else
+        println("Resume simulations is DISABLED. Re-running all simulations from the beginning.")
+    end
+	flush(stdout)
+    if size(run_scenario_list, 1) > 0
+        df_vector = [DataFrame() for _ in 1:maximum(run_scenario_ids)]
+        if simulation_nthreads > 1
+            # Create a separated dict for each thread: https://discourse.julialang.org/t/thread-local-dict-for-each-thread/51441/3
+            general_parametersn_dict_vector = [deepcopy(general_simulation_parameters) for _ in 1:Threads.nthreads()]
+            instance_parameters_dict_vector = [deepcopy(instance_simulation_parameters) for _ in 1:Threads.nthreads()]
+            Threads.@threads for (scenario_id, scenario) in collect(run_scenario_list)  # For each scenario in instance file
+                tid = Threads.threadid()
+                df_vector[scenario_id] = process_individual_scenario(scenario_id, scenario, general_parametersn_dict_vector[tid], instance_parameters_dict_vector[tid])
+            end
+        else  # no parallelization
+            for (scenario_id, scenario) in run_scenario_list  # For each scenario in instance file
+                df_vector[scenario_id] = process_individual_scenario(scenario_id, scenario, general_simulation_parameters, instance_simulation_parameters)
+            end
+        end
+		# Concatenate all generated opt_results dataframes and save to disk => DISABLED
+        ### opt_df = vcat(df_vector...)
+        ### save_optimization_results_dataframe_to_file(base_simulation_dir, model, instance_name, opt_df, general_logger; reopt=true)
+        scenario_end_processing_time = time_ns()
+        total_processing_time = (scenario_end_processing_time - scenario_start_processing_time) / 1.0e9
+        # Dados a serem armazenados nas simulações para análise futura (e.g. box plot):
+        #    - Custo da solução (determinístico x robusto)
+        #    - Quantidade de energia comprada fora do contrato
+        #    - Nível na bateria em cada instante de tempo
+        #    - Tempo gasto para rodar o PPL com a re-otimização.
+        return total_processing_time
+    else
+        println("No scenarios to be simulated. All necessary results already exist on disk.")
+		flush(stdout)
+        return 0.0
+    end
 end
 
-function test_solve_robust_from_t_2()
-    datafile = pwd() * "/../notebooks/data/antoine/A_instance2_11scen_1NDU_shift_test.txt"
-    instance_as_dict = read_tabulated_data(datafile)
-    output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "log"])
-    output_file_log = joinpath(normpath(output_path), "test_solve_robust_from_t_2" * "_A_instance2_11scen_1NDU_shift_test" * ".log")
-    output_file_inf_log = joinpath(normpath(output_path), "Infeasible_solve_robust_from_t_2" * "_A_instance2_11scen_1NDU_shift_test" * ".log")
-    scenario_logger = open(output_file_log, "w+")
-    infeasible_logger = open(output_file_inf_log, "w+")
-    rob_value, rob_solution, solve_time, status = solve_robust_model(instance_as_dict, scenario_logger, infeasible_logger, 1800.0, false, 2)
-    close(scenario_logger)
-    close(infeasible_logger)
-end
+# Simulate the RTCS for a given microgrid 'instance_name', based on a given CCP 'model'.
+function simulate_instance(model, test_name, instance_name, instance_as_dict, general_simulation_parameters;
+        scenario_filter = Int64[], save_trace_info = false, model_policy_list = ["ignore_model", "full_model"], # "batteries", "batteries_and_drivable"
+        sim_strategy_list = ["conservative", "audacious", "cheapest"], reoptimize_values = [false, true])
 
-function simulate_antoine_instance(base_folder, test_set, cplex_old, scenario_filter = Int64[])
-    test_name = "Antoine"
     df = DataFrame(Instance = String[], TestName = String[], ModelName = String[],
         Strategy = String[], Reoptimize = Bool[], TimeSpent = Float64[],
         ReOptTime = Float64[], Contracts = Array{Int64, 2}[])
-    println("\n===================\n  RCCP Simulator\n===================\n")
-    time_limit = 14000.0
+    println("\n===================\n  CCP Simulator\n===================\n")
+    time_limit = general_simulation_parameters["time-limit"]
     trace_df, var_df = create_empty_trace_dataframe()
     variable_values_after_uncertainty_df = create_empty_dataframe_variable_values_after_uncertainty()
-    for instance_name in test_set
-        instance_filename = joinpath(normpath(base_folder), instance_name)
-        # Open a logfile for writing
-        output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "log"])
-        output_file_log = joinpath(normpath(output_path), test_name * "_" * instance_name * ".log")
-        scenario_logger = open(output_file_log, "w+")
-        try
-            println(scenario_logger, "===========================================================================")
-            println("Simulation for instance $(instance_name)")
-            println(scenario_logger, "Simulation for instance $(instance_name)")
-            # Read instance file
-            instance_as_dict = read_tabulated_data(instance_filename)
-            scenario_list = instance_as_dict["scenarios"]
-            nbScenarios = size(scenario_list, 1)
-            # For each period t, obtain "pure" model variables values after uncertainty is revealed
-            #println(scenario_logger, "Calculating pure model variables...")
-            #for reoptimize in [false]  # false
-            #    variable_values_after_uncertainty_df_2 = calculate_pure_model_variables_after_uncertainty_is_known(instance_filename,
-            #                                                test_name, instance_name, reoptimize, time_limit, cplex_old, scenario_logger)
-            #    variable_values_after_uncertainty_df = vcat(variable_values_after_uncertainty_df, variable_values_after_uncertainty_df_2)
-            #end
-            output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "trace"])
-            # Run RTCS Simulation
-            total_p_time = 0.0
-            for model_policy in ["ignore_model", "full_model"] # "batteries", "batteries_and_drivable"
-                if model_policy == "full_model"
-                    for sim_strategy in ["conservative", "audacious", "cheapest"]
-                        for reopt in [false, true]
-                            println("\nSimulation for $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
-                            println(scenario_logger, "Simulation for $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
-                            trace_df_2_list, p_time = simulate(instance_as_dict, test_name, instance_name, output_path, sim_strategy,
-                                model_policy, time_limit, cplex_old, scenario_logger, scenario_filter, reopt)
-                            println(scenario_logger, "Done. Processing time : $(string(p_time))")
-                            println("Done. Processing time : $(string(p_time))")
-                            flush(scenario_logger)
-                            total_p_time += p_time
-                            #trace_df = vcat(trace_df, trace_df_2)
-                        end
+    # Setup temporary dir for files
+    temp_dir = mktempdir(tempdir(); prefix="RCCP_", cleanup=true)
+    # Open a logfile for writing
+    simulation_log_dir = get_simulation_log_dir(general_simulation_parameters, instance_name * "_" * Dates.format(Dates.now(), "yyyy-mm-dd_HH-MM-SS"))
+    base_result_filename = model * "_" * test_name * "_" * instance_name
+    output_file_log = joinpath(normpath(simulation_log_dir), base_result_filename * ".log")
+    scenario_logger = open(output_file_log, "w+")
+    simulation_nthreads = general_simulation_parameters["simulation-nthreads"]
+    forecast_type = general_simulation_parameters["forecast-type"]
+    try
+        result_filepath = joinpath(normpath(simulation_log_dir), base_result_filename * ".csv")
+        result_file_exists = isfile(result_filepath)
+        result_file = open(result_filepath, "a+")
+        println("\nSaving consolidated simulation results file to $(result_filepath)...")
+        if !result_file_exists
+            println(result_file, "model,Gamma_perc,test_name,instance_name,model_policy,sim_strategy,reopt,forecast_type,num_threads,time_spent")
+        end
+        println(scenario_logger, "===========================================================================")
+        println("Simulation for instance $(instance_name)")
+        println(scenario_logger, "Simulation for instance $(instance_name)")
+        scenario_list = instance_as_dict["scenarios"]
+        nbScenarios = size(scenario_list, 1)
+        # Run RTCS Simulation
+        total_p_time = 0.0
+        gamma_list = [0]
+        if model == "robust-budget"
+            gamma_list = general_simulation_parameters["gamma-values"]
+        end
+        # Setup initial and final scenario numbers in simulation
+        initial_scenario = general_simulation_parameters["initial-scenario"]
+    	final_scenario = general_simulation_parameters["final-scenario"]
+        println("Initial scenario: $(initial_scenario), Final scenario: $(final_scenario)")
+        scenario_filter = [x for x in initial_scenario:final_scenario]
+        for Gamma_perc in gamma_list
+            for model_policy in model_policy_list
+                for sim_strategy in sim_strategy_list
+                    reopt_values = deepcopy(reoptimize_values)
+                    if model_policy == "ignore_model" # 'ignore_model' uses only y variable info, so no reoptimization is needed
+                        reopt_values = [false]
                     end
-                else  # 'ignore_model' uses only y variable info, so no reoptimization is needed
-                    reopt = false
-                    for sim_strategy in ["conservative", "audacious", "cheapest"]
-                        println(scenario_logger, "Simulation for $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
-                        trace_df_2_list, p_time = simulate(instance_as_dict, test_name, instance_name, output_path, sim_strategy,
-                            model_policy, time_limit, cplex_old, scenario_logger, scenario_filter, reopt)
+                    for reopt in reopt_values
+                        println("\nSimulation for Gamma=$(Gamma_perc) x $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
+                        println(scenario_logger, "Simulation for Gamma=$(Gamma_perc) x $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
+						flush(stdout)
+						flush(scenario_logger)
+                        instance_simulation_parameters = Dict("sim_strategy"=>sim_strategy, "reoptimize"=>reopt, "model_policy"=>model_policy,
+                            "scenario_filter"=>scenario_filter, "time_limit"=>time_limit, "model"=>model, "instance_as_dict"=>instance_as_dict,
+                            "test_name"=>test_name, "instance-name"=>instance_name, "base_simulation_dir"=>normpath(general_simulation_parameters["base_output_path"]),
+                            "verbose"=>general_simulation_parameters["simulation-verbose"], "Gamma_perc"=>Gamma_perc, "temp-dir"=>temp_dir,
+                            "scenario_filter"=>scenario_filter, "simulation-log-dir"=>simulation_log_dir, "output-folder"=>general_simulation_parameters["output-folder"])
+                        p_time = simulate(general_simulation_parameters, instance_simulation_parameters, scenario_logger)
                         println(scenario_logger, "Done. Processing time : $(string(p_time))")
+                        println("Done. Processing time : $(string(p_time))")
                         flush(scenario_logger)
                         total_p_time += p_time
-                        #trace_df = vcat(trace_df, trace_df_2)
+                        # Export simulation summary to CSV file
+                        println(result_file, "$model,$Gamma_perc,$test_name,$instance_name,$model_policy,$sim_strategy,$reopt,$forecast_type,$(simulation_nthreads),$p_time")
+                        flush(result_file)
                     end
                 end
             end
-            println(scenario_logger, "Simulation done. Processing time : $(string(total_p_time))")
-            # Save variable_values_after_uncertainty_df to CSV and JLD files
-            #output_file_vv = joinpath(normpath(output_path), test_name * "_RCCP_VariableValues_" * instance_name)
-            #println("\nSaving variable values CSV file to $(output_file_vv)...")
-            #println(scenario_logger, "\nSaving variable values CSV file to $(output_file_vv)...")
-            #CSV.write(output_file_vv * ".csv", variable_values_after_uncertainty_df)
-            # Serialize dataframe to file
-            #save(output_file_vv * ".jld", "variable_values", variable_values_after_uncertainty_df)
-
-            # Serialize dataframe to file
-            #save(output_file * ".jld", "trace", trace_df)
-            # push!(df, [[instance_name, test_name, "Robust_RCCP_Sim", sim_strategy, reopt] ; result_as_array])
-            # Create an output file to write the dataframe to disk
-            #output_file = joinpath(normpath(output_path), test_name * "_Robust_RCCP_Sim_Summary.csv")
-            #println("\nSaving results file to $(output_file)...")
-            #CSV.write(output_file, df)
-            concatenate_trace_df_list(test_name, instance_name, scenario_logger)
-            println("\nDone.")
-            println(scenario_logger, "\nDone.")
-        catch e
-            bt = catch_backtrace()
-            msg = sprint(showerror, e, bt)
-            println(msg)
-            println(scenario_logger, "Exception thrown: \n" * msg)
-        finally
-            # Close the log file
-            close(scenario_logger)
         end
+        println(scenario_logger, "Simulation done. Processing time : $(string(total_p_time))\n")
+        close(result_file)
+    	concatenate_trace_df_list(general_simulation_parameters, model, test_name, instance_name, scenario_logger)
+    	println("\n[CCP Simulator] DONE.")
+        println(scenario_logger, "\n[CCP Simulator] DONE.")
+    catch e
+        bt = catch_backtrace()
+        msg = sprint(showerror, e, bt)
+        println(msg)
+        println(scenario_logger, "[CCP Simulator] Exception thrown: \n" * msg)
+    finally
+        flush(stdout)
+        flush(scenario_logger)
+        # Close the log file
+        close(scenario_logger)
     end
 end
 
@@ -434,17 +577,3 @@ function fix_cost_variable_type(cost)
         return cost
     end
 end
-
-function run_simulation()
-    # run simulation tests
-    test_set = ["A_instance2_1NDU_Cons_1000s_skewed-left.txt", "A_instance2_1NDU_Cons_1000s_skewed-right.txt", "A_instance2_1NDU_Cons_1000s_uniform.txt"]
-    
-    base_folder = pwd() * "/instances/full_instances/"
-    cplex_old = true
-    #scenario_filter = [0, 1]
-    simulate_antoine_instance(base_folder, test_set, cplex_old)  #, scenario_filter)
-end
-
-
-#run_simulation()
-

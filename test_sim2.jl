@@ -1,20 +1,26 @@
-include("RCCP_Robust_Simulation.jl")
+include("cli_arguments.jl")
+include("RCCP_Facade.jl")
 
-function test_simulation()
-    # run simulation tests
-    # test_solve_robust_from_t_2()
-    #test_set = ["A_instance2_11scen_1contract.txt"]  # "A_instance2_11scen_1NDU.txt" , "A_instance2_11scen.txt"]  # "A_instance2_11scen_1contract.txt"
-    #test_set = ["A_instance2_11scen_1NDU.txt"] # ["A_instance2_11scen_noNDU.txt", "A_instance2_11scen_noNDU.txt"]
-    test_set = ["A_instance2_100s_skewed-left.txt", "A_instance2_100s_uniform.txt", "A_instance2_100s_skewed-right.txt"]
-    #test_set = ["A_instance2_100s.txt"]
-    #test_set = ["A_instance2_1NDU_100s.txt"]
+EXPERIMENT_NAME = "test_sim_2"
+# If possible, do not modify the lines below
+parsed_args["output-folder"] = abspath(create_full_dir(normpath(output_folder),
+	[EXPERIMENT_NAME]))
 
-    base_folder = pwd() * "/instances/"
-    #base_folder = pwd() * "/../notebooks/data/antoine/"
-    #base_folder = pwd() * "/instance_gen/output/scenarios/"
-    cplex_old = true
-    scenario_filter = [x for x in 0:10]
-    simulate_antoine_instance(base_folder, test_set, cplex_old, scenario_filter)
-end
-
-test_simulation()
+parsed_args = parse_commandline()
+#parsed_args["instances"] = "antoine-skew"
+#parsed_args["instances"] = "antoine_11"
+parsed_args["instances"] = "toy"
+# Solve models
+#parsed_args["what"] = "solve"
+#parsed_args["model"] = "robust-box"
+#run_experiment(parsed_args)
+#parsed_args["model"] = "deterministic"
+#run_experiment(parsed_args)
+# Simulate based on model results
+parsed_args["what"] = "simulate"
+parsed_args["model"] = "robust-box"
+parsed_args["verbose"] = true
+parsed_args["solver-verbose"] = true
+run_experiment(parsed_args)
+#parsed_args["model"] = "deterministic"
+#run_experiment(parsed_args)

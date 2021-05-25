@@ -9,13 +9,14 @@ function compute_statistics(base_folder, test_set)
         avg_perc_max = Float64[], avg_perc_energy = Float64[])
     verbose = false
     println("\n===================\n  RCCP UNDS Statistics\n===================\n")
-    output_path = create_full_dir(normpath(pwd()), ["output", "stats"])
+    output_path = create_full_dir(normpath(EXPERIMENT_OUTPUT_FOLDER), ["output", "stats"])
     output_file_df = joinpath(normpath(output_path), "stats_full.csv")
     output_file_df_summary = joinpath(normpath(output_path), "stats_summary.csv")
     for instance_name in test_set
         instance_filename = joinpath(normpath(base_folder), instance_name)
         try
             println("Analysis for instance $(instance_name)")
+            flush(stdout)
             # Read instance file
             instance_as_dict = read_tabulated_data(instance_filename)
             # Run Analysis
@@ -73,7 +74,7 @@ function compute_statistics(base_folder, test_set)
                 sum_energy = zeros(Float64, nbNDU)
                 sum_v_bar = zeros(Float64, nbNDU)
                 for t in 1:nbT   # For each time period t
-                    period_size = period_info[:size][t]
+                    period_size = period_info[!, :size][t]
                     P_hat_t = zeros(Float64, nbNDU)  # P_hat for a whole time period t for each uncertain device
                     for d in 1:period_size  # For each d in period dt
                         P_hat_td = Float64[]
@@ -131,11 +132,12 @@ function compute_statistics(base_folder, test_set)
     println("\nSaving summary CSV file to $(output_file_df_summary)...")
     CSV.write(output_file_df_summary, summary_df)
     println("\nDone.")
+    flush(stdout)
 end
 
 function test()
-    #base_folder = pwd() * "/instances/toy"
-    base_folder = pwd() * "/instances/antoine_skew"
+    #base_folder = toy_instances_folder
+    base_folder = antoine_instances_folder
     files_to_process = readdir(base_folder)
     tamanho = size(files_to_process)
     test_set = files_to_process

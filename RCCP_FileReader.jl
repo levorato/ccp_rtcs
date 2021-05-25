@@ -5,23 +5,21 @@ using DataFrames
 using CPLEX
 using JLD2, FileIO
 using ZipFile
+using Arrow
+using CodecZlib
+using Mmap
+using Dates
 
 # Epsilon used in floating point comparisons
 EPS = 1e-5
 ZERO = zero(1.0)
-# Rounding error allowed in RTCS Operations (e.g. battery and drivable storage / retrieval)
-RTCS_ROUNDING_ERROR = 0.01
-CPLEX_OPT_GAP = 0.02  # gap of cplex adjusted to 2%
 
 function create_full_dir(basepath, folders)
     fullpath = basepath
     for folder in folders
         fullpath = joinpath(fullpath, folder)
-        if ! isdir(fullpath)
-            mkdir(fullpath)
-        end
     end
-    return fullpath
+    return mkpath(fullpath)
 end
 
 # Method to read Xpress input files
@@ -91,8 +89,8 @@ function read_xpress_file(filepath)
                 rename!(contract, :x1 => :period, :x2 => :cost_fix, :x3 => :cost_var,
                     :x4 => :min_period, :x5 => :max_period, :x6 => :min_delta, :x7 => :max_delta)
                 # Convert period to Integer
-                #contract[:period] = convert(DataVector{Int64}, contract[:period])
-                contract[:period] = map(x -> convert(Int64, x), contract[:period])
+                #contract[!, :period] = convert(DataVector{Int64}, contract[!, :period])
+                contract[!, :period] = map(x -> convert(Int64, x), contract[!, :period])
                 println("Contract: $(contract)")
             elseif count == 4
                 record_as_string = String["", "", ""]
@@ -110,8 +108,8 @@ function read_xpress_file(filepath)
                 drivable_pORc_min = readdlm(IOBuffer(record_as_string[3]))
                 drivable = convert(DataFrame, drivable_cost)
                 rename!(drivable, :x1 => :cost)
-                drivable[:pORc] = [ drivable_pORc[i, :] for i in 1:size(drivable_pORc, 1) ]
-                drivable[:pORc_min] = [ drivable_pORc_min[i, :] for i in 1:size(drivable_pORc_min, 1) ]
+                drivable[!, :pORc] = [ drivable_pORc[i, :] for i in 1:size(drivable_pORc, 1) ]
+                drivable[!, :pORc_min] = [ drivable_pORc_min[i, :] for i in 1:size(drivable_pORc_min, 1) ]
                 println("Drivable: $(drivable)")
             elseif count == 5
                 record_as_string = ["", ""]
@@ -133,7 +131,7 @@ function read_xpress_file(filepath)
                 n_drivable_pORc = readdlm(IOBuffer(record_as_string[2]))
                 n_drivable = convert(DataFrame, n_drivable_cost)
                 rename!(n_drivable, :x1 => :cost)
-                n_drivable[:pORc] = [ n_drivable_pORc[i, :] for i in 1:size(n_drivable_pORc, 1) ]
+                n_drivable[!, :pORc] = [ n_drivable_pORc[i, :] for i in 1:size(n_drivable_pORc, 1) ]
                 println("Non Drivable: $(n_drivable)")
                 #println("Non Drivable Cost: $(n_drivable_cost)")
                 #println("Non Drivable pORc: $(n_drivable_pORc)")
@@ -147,7 +145,7 @@ function read_xpress_file(filepath)
        end
        count += 1
     end
-    println("\n\nInstance read successfully.\n\n")
+    println("===> Instance read successfully.\n")
 
     instance_as_dict = Dict()
     instance_as_dict["instance"] = instance
@@ -161,7 +159,128 @@ function read_xpress_file(filepath)
     return instance_as_dict
 end
 
-function read_tabulated_data(filepath, verbose = false)
+# Get the season start and end dates (northern hemisphere) for a specific year Y.
+function get_season_dates(Y)
+    return Dict( [( "winter", [ (DateTime(Y,  1,  1), DateTime(Y,  3, 20)), (DateTime(Y, 12, 21), DateTime(Y, 12, 31)) ]),
+           ( "spring", [ (DateTime(Y,  3, 21), DateTime(Y,  6, 20)) ] ),
+           ( "summer", [ (DateTime(Y,  6, 21), DateTime(Y,  9, 22)) ] ),
+           ( "autumn", [ (DateTime(Y,  9, 23), DateTime(Y, 12, 20)) ] ) ] )
+end
+
+function get_season(mydate)
+    # Japan is Northern Hemisphere
+    start_month = Dict(["winter" => 12, "spring" => 3, "summer" => 6, "autumn" => 9])
+    end_month = Dict(["winter" => 2, "spring" => 5, "summer" => 8, "autumn" => 11])
+    # get the current day of the year
+    doy = Dates.dayofyear(mydate)
+    # "day of year" ranges for the northern hemisphere
+    spring = 80:172
+    summer = 172:264
+    fall = 264:355
+    # winter = everything else
+    if doy in spring
+        return "spring"
+    elseif doy in summer
+        return "summer"
+    elseif doy in fall
+        return "fall"
+    else
+        return "winter"
+    end
+end
+
+# Reads all Japan microgrid scenarios (of uncertain devices) from CSV files, returning a concatenated dataframe.
+# 'season' (season of the year) parameter is optional, and can be used to filter the scenarios.
+function read_scenario_dataframes(instance_group, instance_name, non_drivable_list, numberOfPeriods, period_size_list, verbose = false)
+    println("[Japan instances] Reading scenarios from dataframe files...")
+    scenario_folder = joinpath(instances_folder, "japan_microgrid", instance_group, "scenarios")
+    csv_filelist = []
+    for filename in searchdir(scenario_folder, ".csv.gz")
+        inputfile = joinpath("$(scenario_folder)", "$(filename)")
+        push!(csv_filelist, (filename, inputfile))
+    end
+    # Read all files and append to a single dataframe df
+    df_list = []
+    for csv_file in csv_filelist
+        df = CSV.File(transcode(GzipDecompressor, Mmap.mmap(csv_file[2])), delim=',') |> DataFrame
+        # convert timestamp column to datetime
+        df[!, :timestamp] = DateTime.(df[!, :timestamp], dateformat"yyyy-mm-dd HH:MM:SS")
+        push!(df_list, df)
+    end
+    df = vcat(df_list...; cols=:union)
+    # Obtain instance season by extracting last part of the instance_name
+    season = instance_name[findlast(isequal('_'),instance_name)+1:findlast(isequal('.'),instance_name)-1]
+    if length(season) > 0  # filter scenarios according to the season of the year
+        println("[read_scenario_dataframes] Filtering scenario dataframe with season criteria: season == $(season)")
+        df_list_seasonal = []
+        first_year = Dates.year(minimum(df[!, :timestamp]))
+        last_year = Dates.year(maximum(df[!, :timestamp]))
+        for year in first_year:last_year
+            season_date_dict = get_season_dates(year)
+            date_list = season_date_dict[season]
+            for start_end_date_tuple in date_list
+                start_date = start_end_date_tuple[1]
+                end_date = start_end_date_tuple[2]
+                println("Season $(season): [$(start_date) - $(end_date)]")
+                df_season = df[(df[!, :timestamp] .>= start_date) .& (df[!, :timestamp] .< end_date), :]
+                push!(df_list_seasonal, df_season)
+            end
+        end
+        df = vcat(df_list_seasonal...; cols=:union)
+    end
+    num_scenarios = size(df, 1)
+    println("The number of scenarios is $(num_scenarios).")
+    unds_count = 2
+    println("The number of uncertain devices is $(unds_count).")
+    reading_scenario = true
+    scenario_count = 0
+    # Obtain the fixed building consumption value (will be used later to be subtracted from Building_Consumption_Wh)
+    fixed_building_consumption = non_drivable_list[1][3]
+    # Get a unique list of days => each day is a valid scenario
+    df[!, :day] = Date.(df[!, :timestamp])
+    unique_day_list = unique(df[!, :day])
+    unds_scenario_list = []
+    for current_date in unique_day_list
+        scenario_count += 1
+        if verbose
+            println("Scenario #$(scenario_count) - Day: $(current_date)")
+        end
+        df_current_date = df[(df[!, :day] .== current_date), :]
+        # Building consumption must be comprised of negative values
+        df_current_date[!, :Building_Consumption_Wh] .*= -1
+        unds_values = [ df_current_date[!, :Building_Consumption_Wh], df_current_date[!, :PV_Production_Wh] ]
+        scenario_vect = Array[]
+        for j in 1:unds_count
+            if verbose
+                println("UNDS #$(j)")
+            end
+            # Capture the production / consumption values for the periods of each hour
+            matrix = Array[]
+            for k in 1:numberOfPeriods
+                num_deltas = Int64(ceil(period_size_list[k]))
+                martrix_row_as_float = unds_values[j][num_deltas*(k-1)+1 : num_deltas*k]
+                if j == 1
+                    # We need to subtract Building_Consumption_Wh from the fixed building consumption value at each delta dt
+                    martrix_row_as_float .-= (fixed_building_consumption[k] / num_deltas)
+                    martrix_row_as_float = min(martrix_row_as_float, zeros(num_deltas))
+                else
+                    # For the PV array, treat invalid negative values
+                    martrix_row_as_float = max(martrix_row_as_float, zeros(num_deltas))
+                end
+                push!(matrix, martrix_row_as_float)
+            end
+            push!(scenario_vect, matrix)
+            if verbose
+                println("Scenario $(scenario_count) x UNDS $(j): $(matrix)")
+            end
+        end
+        push!(unds_scenario_list, scenario_vect)
+    end
+    return unds_scenario_list
+end
+
+# Input file reader function: reads instance data from .txt file.
+function read_tabulated_data(filepath, instance_group, instance_name, verbose = false)
     # Read instance file
     println("Processing input file: $(filepath)...")
     file = open(filepath)
@@ -220,7 +339,7 @@ function read_tabulated_data(filepath, verbose = false)
             P = split(lines[count + 1], r" |\t")[2:end]
             filter!(x->x!="", P)
             count += 1
-            push!(bag["NDrivableS"], [dev_name, cost, [parse(Int, x) for x in P]])
+            push!(bag["NDrivableS"], [dev_name, cost, [parse(Float64, x) for x in P]])
         elseif contains(ln, "DrivableS")
             ln = strip(ln)
             dev_name_and_cost = split(strip(ln), r" |\t")
@@ -303,11 +422,15 @@ function read_tabulated_data(filepath, verbose = false)
         end
         count += 1
     end
+    # v2: Alternative scenario reader, for Japan instances
+    if occursin("japan", lowercase(instance_group))
+        bag["Scenarios"] = read_scenario_dataframes(instance_group, instance_name, bag["NDrivableS"], numberOfPeriods, [x[1] for x in bag["Period"]], verbose)
+    end
     #println("\nPeriod data: $(bag["Period"])\n")
     #println("DrivableS: $(bag["DrivableS"])\n")
     #println("NDrivableS: $(bag["NDrivableS"])\n")
     if verbose
-        println("UNDS: $(bag["UNDS"])\n")
+        println("UNDS: $(bag["UNDS"])")
     end
     #println("Storage: $(bag["Storage"])\n")
     #println("Contract: $(bag["Contract"])\n")
@@ -338,17 +461,18 @@ function read_tabulated_data(filepath, verbose = false)
     # number of storage systems
     nbSt = length(bag["Storage"])
     instance = [nbT, nbS, nbC, nbD, nbND, nbSt]
-    println("\nInstance: $(instance)")
+    println("Instance: $(instance)")
     nbNDU = size(bag["UNDS"])
-    println("\nnbNDU: $(nbNDU)")
+    println("nbNDU: $(nbNDU)")
 
     # Period
     for i in 1:nbT
         push!(period, bag["Period"][i]')
     end
     # Convert period size to Integer
-    #period[:size] = convert(DataVector{Int64}, period[:size])
-    period[:size] = map(x -> convert(Int64, x), period[:size])
+    #period[!, :size] = convert(DataVector{Int64}, period[!, :size])
+    #period[!, :size] = map(x -> convert(Int64, x), period[!, :size])
+    period[!,:size] = map(x->(v = convert(Int64,x); v == nothing ? -1.0 : v), period[!,:size])
     if verbose
         println("\nPeriod:")
         showall(period)
@@ -364,8 +488,8 @@ function read_tabulated_data(filepath, verbose = false)
         contract[i, :period] += 1
     end
     # Convert period to Integer
-    #contract[:period] = convert(DataVector{Int64}, contract[:period])
-    contract[:period] = map(x -> convert(Int64, x), contract[:period])
+    #contract[!, :period] = convert(DataVector{Int64}, contract[!, :period])
+    contract[!, :period] = map(x -> convert(Int64, x), contract[!, :period])
     if verbose
         println("\nContract:")
         showall(contract)
@@ -425,7 +549,7 @@ function read_tabulated_data(filepath, verbose = false)
         t = contract[c,:period]
         num_contracts[t] += 1
     end
-    println("\n\nInstance read successfully.\n\n")
+    println("===> Instance read successfully.\n")
 
     instance_as_dict = Dict()
     instance_as_dict["instance"] = instance
@@ -466,15 +590,44 @@ function obtain_instance_ranges(nbT, nbS, nbC, nbD, nbND, nbSt, nbNDU)
     return 1:nbT, 1:nbS, 1:nbC, 1:nbD, 1:nbND, 1:nbSt, 1:nbNDU
 end
 
-function create_cplex_model(time_limit, cplex_old = false, robust = false, relative_gap_tol = CPLEX_OPT_GAP)
-    if cplex_old
-        if robust  # for robust model, set relative gap tolerance to get solution in viable time
-            return Model(solver=CplexSolver(CPX_PARAM_EPGAP=relative_gap_tol,CPX_PARAM_SCRIND=0))
+function create_basic_jump_model(solver)
+	if solver == "Gurobi"
+		println("Using Gurobi solver.")
+		model = Model(Gurobi.Optimizer)
+	elseif solver == "CPLEX"
+		println("Using CPLEX solver.")
+		model = Model(CPLEX.Optimizer)
+	else
+	  println("No solver defined")
+	  model = nothing
+	end
+	return model
+end
+
+function create_jump_model(solver_parameters)
+    model = create_basic_jump_model(solver)
+    if solver_parameters["solver"] == "Gurobi"
+        MOI.set(model, MOI.RawParameter("TimeLimit"), solver_parameters["solver-time-limit"])
+		MOI.set(model, MOI.RawParameter("Threads"), solver_parameters["max-cores"])
+		# https://www.gurobi.com/documentation/9.1/refman/mipgapabs.html
+        MOI.set(model, MOI.RawParameter("MIPGapAbs"), 1e-5)   # default is 1e-10
+        # TODO relative_gap_tol, if robust && limit_relative_gap with solver_parameters["relative-gap-tol"]
+		if !solver_parameters["solver-verbose"]
+            MOI.set(model, MOI.RawParameter("OutputFlag"), 0)
         end
-        return Model(solver=CplexSolver(CPX_PARAM_TILIM=time_limit,CPX_PARAM_SCRIND=0))
+    elseif solver_parameters["solver"] == "CPLEX"
+        MOI.set(model, MOI.RawParameter("CPX_PARAM_TILIM"), solver_parameters["solver-time-limit"])
+        MOI.set(model, MOI.RawParameter("CPX_PARAM_THREADS"), solver_parameters["max-cores"])
+		MOI.set(model, MOI.RawParameter("CPX_PARAM_EPAGAP"), 1e-5)   # default is 1e-6
+        # for robust model, set relative gap tolerance to get solution in viable time
+        MOI.set(model, MOI.RawParameter("CPX_PARAM_EPGAP"), solver_parameters["relative-gap-tol"])
+        if !solver_parameters["solver-verbose"]
+            MOI.set(model, MOI.RawParameter("CPX_PARAM_SCRIND"), 0)
+        end
     else
-        return Model(solver=CplexSolver(CPXPARAM_TimeLimit=time_limit,CPX_PARAM_SCRIND=0))
+      println("No solver defined")
     end
+    return model
 end
 
 function trunc_if_less_than_eps(value::Float64)
@@ -484,8 +637,12 @@ function trunc_if_less_than_eps(value::Float64)
     return value
 end
 
-function create_trace_scenario_filename(test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
-    return test_name * "_" * instance_name * "_" * sim_strategy * "_" * model_policy * "_ReOpt-" * string(reoptimize) * "_scen" * string(scenario_id)
+function create_trace_scenario_filename(model, Gamma_perc, test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
+    if model == "robust-budget"
+        return model * "_$(Int64(ceil(Gamma_perc)))_" * test_name * "_" * instance_name * "_" * sim_strategy * "_" * model_policy * "_ReOpt-" * string(reoptimize) * "_scen" * string(scenario_id)
+    else
+        return model * "_" * test_name * "_" * instance_name * "_" * sim_strategy * "_" * model_policy * "_ReOpt-" * string(reoptimize) * "_scen" * string(scenario_id)
+    end
 end
 
 function generate_all_model_parameter_combination(model_policy_params = ["full_model", "ignore_model"],
@@ -508,30 +665,61 @@ function generate_all_model_parameter_combination(model_policy_params = ["full_m
     return parameters_to_process
 end
 
-extension(url::String) = try match(r"\.[A-Za-z0-9]+$", url).match catch "" end
+function GetFileExtension(filename)
+    if isnothing(findlast(isequal('.'),filename))
+        return ""
+    else
+        return filename[findlast(isequal('.'),filename):end]
+    end
+end
 
-function concatenate_trace_df_list(test_name, instance_name, general_logger, df_filepath = "")
-    trace_files_path = create_full_dir(normpath(pwd()), ["output", "simulation", "zip", instance_name])
+function get_simulation_zip_dir(simulation_args, instance_name; consolidated = false)
+    if consolidated
+        return create_full_dir(normpath(simulation_args["output-folder"]), ["output", "simulation", "zip", "consolidated"])
+    end
+    return create_full_dir(normpath(simulation_args["output-folder"]), ["output", "simulation", "zip", instance_name])
+end
+
+function get_simulation_trace_dir(simulation_args)
+    instance_name = simulation_args["instance-name"]
+    temp_dir = simulation_args["temp-dir"]
+    return mkpath(joinpath(temp_dir, instance_name))
+end
+
+function get_simulation_log_dir(simulation_args, id_timestamp_str)
+    return create_full_dir(normpath(simulation_args["output-folder"]), ["output", "simulation", "log", id_timestamp_str])
+end
+
+function concatenate_trace_df_list(simulation_args, model, test_name, instance_name, general_logger, df_filepath = "")
+    trace_files_path = get_simulation_zip_dir(simulation_args, instance_name)
     if length(df_filepath) > 0
         trace_files_path = normpath(df_filepath, instance_name)
     end
-    output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "trace"])
-    output_file = joinpath(normpath(output_path), test_name * "_RCCP_Sim_TRACE_" * instance_name)
+    output_path = get_simulation_zip_dir(simulation_args, instance_name; consolidated=true)
+    output_file = joinpath(normpath(output_path), model * "_" * test_name * "_RCCP_Sim_TRACE_" * instance_name)
+    output_file_csv = output_file * ".csv.gz"
+    output_file_arrow = output_file * ".arrow"
+    if isfile(output_file_arrow)
+		println("Skipping dataframe concatenation, results already exist.")
+        println(general_logger, "Skipping dataframe concatenation, results already exist.")
+        return
+	end
     println(general_logger, "Concatenating individual trace_df dataframes...")
     trace_df_full, var_df_full = create_empty_trace_dataframe()
-    tmp_file_path = "/tmp/rcc_temp_df.csv"
+    tid = Threads.threadid()
     println(general_logger, "Processing dir : $(trace_files_path)")
     for file in readdir(trace_files_path)
-        if extension(file) == ".zip"
-            trace_file_zip = joinpath(trace_files_path, file)
+        if (GetFileExtension(file) == ".zip") && (occursin(model, file))
+            trace_file_zip = joinpath(strip(trace_files_path), file)
             #println("Reading zip file : $(file)...")
             try
                 r = ZipFile.Reader(trace_file_zip)
                 for f in r.files
-                    if extension(f.name) == ".jld2"
+                    if GetFileExtension(f.name) == ".jld2"
                         try
                             println("Reading JLD2 file : $(f.name)...")
-                            s = readstring(f)
+                            s = read(f, String)
+                            tmp_file_path = joinpath(tempdir(), "ccp_temp_df_thread_$(tid).jld2")
                             tmp_file_df = open(tmp_file_path, "w+")
                             write(tmp_file_df, s)
                             close(tmp_file_df)
@@ -541,6 +729,15 @@ function concatenate_trace_df_list(test_name, instance_name, general_logger, df_
                         catch y1
                             println("ERROR Reading JLD2 file $(f.name). Cause : $(y1).")
                             println(general_logger, "ERROR Reading JLD2 file $(f.name). Cause : $(y1).")
+                        end
+                    elseif (GetFileExtension(f.name) == ".arrow") && !occursin("_var.arrow", f.name)
+                        try
+                            println("Reading arrow file : $(f.name)...")
+                            trace_df = DataFrame(Arrow.Table(f))
+                            trace_df_full = vcat(trace_df_full, trace_df)
+                        catch y1
+                            println("ERROR Reading arrow file $(f.name). Cause : $(y1).")
+                            println(general_logger, "ERROR Reading arrow file $(f.name). Cause : $(y1).")
                         end
                     end
                 end
@@ -552,29 +749,39 @@ function concatenate_trace_df_list(test_name, instance_name, general_logger, df_
         end
     end
     #rm(tmp_file_path)
-    output_file_csv = output_file * ".csv"
     println("\nSaving full trace CSV file to $(output_file_csv)...")
     println(general_logger, "\nSaving full trace CSV file to $(output_file_csv)...")
-    CSV.write(output_file_csv, trace_df_full)
-    output_file_zip = output_file * ".zip"
-    move_files_to_zip_archive(output_file_zip, [output_file_csv])
+    open(GzipCompressorStream, output_file_csv, "w") do stream
+       CSV.write(stream, trace_df_full)
+    end
+    Arrow.write(output_file_arrow, trace_df_full; compress=:zstd)
     println(general_logger, "Concatenation done.")
     println("Concatenation done.")
 end
 
 # Move the files in the array 'files_to_compress' to the zip file 'output_file_zip'
-function move_files_to_zip_archive(output_file_zip, files_to_compress)
+function move_files_to_zip_archive(output_file_zip, files_to_compress, general_logger)
     w = ZipFile.Writer(output_file_zip)
     for filepath in files_to_compress
         filename = basename(filepath)
-        f = ZipFile.addfile(w, filename, method=ZipFile.Deflate)
-        s = read(filepath, String)
-        write(f, s)
+        if isfile(filepath)
+            f = ZipFile.addfile(w, filename, method=ZipFile.Deflate)
+            s = read(filepath, String)
+            write(f, s)
+        else
+            println(general_logger, "[WARN] move_files_to_zip_archive() - File not found: $(filepath)")
+            flush(general_logger)
+        end
     end
     close(w)
     # Delete the files in files_to_compress
     for filepath in files_to_compress
-        rm(filepath)
+        try
+            rm(filepath)
+        catch file_error
+            println(general_logger, "[WARN] move_files_to_zip_archive() - Unable to remove file: $(filepath)")
+            flush(general_logger)
+        end
     end
 end
 
@@ -582,7 +789,7 @@ function read_file_from_zip_archive(zip_file_path, filename_to_read)
     r = ZipFile.Reader(zip_file_path)
     for f in r.files
         if filename_to_read == f.name
-            s = readstring(f)
+            s = read(f, String)
         end
     end
     close(r)

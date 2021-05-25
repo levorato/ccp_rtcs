@@ -1,0 +1,15 @@
+﻿https://www.nature.com/articles/sdata201920
+
+
+https://mdr.nims.go.jp/concern/datasets/9019s341g
+
+
+https://springernature.figshare.com/collections/Multiyear_microgrid_data_from_a_research_building_in_Tsukuba_Japan/4176698
+
+
+
+
+
+
+Final dataset URL:
+https://springernature.figshare.com/articles/dataset/Multiyear_microgrid_data_from_a_research_building_in_Tsukuba_Japan/7403954?backTo=/collections/Multiyear_microgrid_data_from_a_research_building_in_Tsukuba_Japan/4176698

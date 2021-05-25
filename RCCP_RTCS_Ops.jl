@@ -26,8 +26,8 @@ function retrieve_energy_gap_from_battery(s, storage, ST, gap, r_td, h_td, logge
     energy = min(abs(gap), abs(r_td[s] - storage[s,:uMin]))
 	energy = min(energy, maxRefund)
     r_td[s] -= energy
-    h_td[s] += energy # * storage[s,:lostCoef]  # amount refunded by system s
-    gap += energy #* storage[s,:lostCoef]
+    h_td[s] += energy * storage[s,:lostCoef]  # amount refunded by system s
+    gap += energy * storage[s,:lostCoef]
     cost = storage[s,:cost]
     if verbose println(logger, "        Retrieving energy from battery (s = $(s), unit_cost = $(cost)) : qtd = $(energy) ; gap = $(gap)") end
     return gap, r_td, h_td
@@ -35,10 +35,10 @@ end
 
 # Execute operation on contract c
 function retrieve_energy_gap_from_engaged_buy_contract(c, contracts_in_period_t, period_size, C_t, y, t, d, gap, q_td, previous_q_t, logger, verbose)
-    pi_minus_t = contracts_in_period_t[:min_period][c]
-	pi_plus_t = contracts_in_period_t[:max_period][c]
-	pi_minus_d = contracts_in_period_t[:min_delta][c]
-	pi_plus_d = contracts_in_period_t[:max_delta][c]
+    pi_minus_t = contracts_in_period_t[!, :min_period][c]
+	pi_plus_t = contracts_in_period_t[!, :max_period][c]
+	pi_minus_d = contracts_in_period_t[!, :min_delta][c]
+	pi_plus_d = contracts_in_period_t[!, :max_delta][c]
 	# 1. The maximum energy to be bought (max_buy) is limited by contract upper limits (either period or delta plus)
 	# (including energy already bought in previous deltas)
 	bought_so_far = previous_q_t[c] + q_td[c]
@@ -74,7 +74,7 @@ function retrieve_energy_gap_from_engaged_buy_contract(c, contracts_in_period_t,
 	#println("=> Will buy $(energy) units from contract, q_td[c] = $(q_td[c])")
 	sum_q_t_c = previous_q_t[c] + q_td[c]
 	gap += energy
-    cost_var = contracts_in_period_t[:cost_var][c]
+    cost_var = contracts_in_period_t[!, :cost_var][c]
     if verbose
 		println(logger, "        Retrieving energy from engaged buy contract (c = $(c), cost_var = $(cost_var)) : qtd = $(energy) ; gap = $(gap)")
 	end
@@ -84,10 +84,10 @@ end
 # Execute operation on contract c
 # TODO rewrite rules for this operation !
 function sell_energy_gap_to_engaged_sell_contract(c, contracts_in_period_t, period_size, C_t, y, t, d, gap, q_td, previous_q_t, logger, verbose)
-	pi_minus_t = contracts_in_period_t[:min_period][c]
-	pi_plus_t = contracts_in_period_t[:max_period][c]
-	pi_minus_d = contracts_in_period_t[:min_delta][c]
-	pi_plus_d = contracts_in_period_t[:max_delta][c]
+	pi_minus_t = contracts_in_period_t[!, :min_period][c]
+	pi_plus_t = contracts_in_period_t[!, :max_period][c]
+	pi_minus_d = contracts_in_period_t[!, :min_delta][c]
+	pi_plus_d = contracts_in_period_t[!, :max_delta][c]
     max_sell = -min(abs(pi_plus_d), abs(pi_plus_t) - abs(previous_q_t[c]))
 	# 2. The maxium energy to be sold cannot be greater than the maximum_per_period_t / period_size
 	max_sell = -min(abs(max_sell), abs(pi_plus_t / period_size))
@@ -110,7 +110,7 @@ function sell_energy_gap_to_engaged_sell_contract(c, contracts_in_period_t, peri
 
     q_td[c] += energy   # In sell contracts, q[t,c] is negative by definition !
     gap += energy
-    cost_var = contracts_in_period_t[:cost_var][c]
+    cost_var = contracts_in_period_t[!, :cost_var][c]
     if verbose println(logger, "        Selling extra energy to engaged sell contract (c = $(c), cost_var = $(cost_var)) : qtd = $(energy) ; gap = $(gap)") end
     return gap, q_td
 end

@@ -3,11 +3,11 @@
 include("RCCP_Robust.jl")
 
 time_limit = 7200
-base_folder = pwd() * "/../notebooks/data/antoine/"
+base_folder = antoine_instances_folder
 test_set = ["A_instance2_11scen_1NDU.txt"]  # "A_instance2_11scen.txt"
 #test_set = ["A_instance2_11scen_noNDU.txt", "A_instance2_11scen_noNDU.txt"]
 test_name = "Antoine"
-output_path = create_full_dir(normpath(pwd()), ["output", "simulation", "log"])
+output_path = create_full_dir(normpath(EXPERIMENT_OUTPUT_FOLDER), ["output", "simulation", "log"])
 df = DataFrame(Instance = String[], TestName = String[], ModelName = String[],
     Value = Float64[], Time = Float64[], IsOptimal = Bool[])
 for instance_name in test_set
@@ -22,10 +22,8 @@ for instance_name in test_set
         push!(df, [instance_name, test_name, "Robust_RCCP_GapTol" * string(rel_gap_tol), sol_value, time, status])
     end
     # Create an output file to write the dataframe to disk
-    output_path = joinpath(normpath(pwd()), "output")
-    if ! isdir(output_path)
-        mkdir(output_path)
-    end
+    output_path = joinpath(normpath(EXPERIMENT_OUTPUT_FOLDER), "output")
+    mkpath(output_path)
     output_file = joinpath(normpath(output_path), test_name * "_Robust_RCCP_Test_GapTol.csv")
     println("\nSaving to results file to $(output_file)...")
     CSV.write(output_file, df)

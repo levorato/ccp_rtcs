@@ -44,13 +44,13 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
     contract = instance_as_dict["contract"]
     period = instance_as_dict["period"]
     C_t = 1:num_contracts[t]
-    contracts_in_period_t = contract[contract[:period] .== t, :]
+    contracts_in_period_t = contract[contract[!, :period] .== t, :]
 
-    if model_type == "robust"
-        # Obtain q_t'(.), x_t'(.), e_t'(.), r_t'(.), g_t'(.), based on model solution
+    if model_type == "deterministic"
+		q_t, x_t, e_t, r_t, g_t, h_t = calculate_variables_from_deterministic(instance_as_dict, model_solution, t)
+    else  # Robust
+		# Obtain q_t'(.), x_t'(.), e_t'(.), r_t'(.), g_t'(.), based on model solution
         q_t, x_t, e_t, r_t, g_t, h_t = calculate_variables_from_robust_ldr(instance_as_dict, model_solution, t, P_hat_t, period_size, y)
-    else  # "deterministic"
-        q_t, x_t, e_t, r_t, g_t, h_t = calculate_variables_from_deterministic(instance_as_dict, model_solution, t)
     end
     # The variables below will be calculated according to the chosen RTCS strategy
     q_td = zeros(Float64, num_contracts[t])  # amount consumed (< 0) / provided (> 0) by the client in contract c -> OK!
@@ -59,7 +59,7 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
     g_td = zeros(Float64, nbSt)  # amount absorbed by system s (in ST) during the time period t -> OK!
     h_td = zeros(Float64, nbSt)  # amount refunded by system s (in ST) during time period t -> OK!
     # amount stored in system s (in ST) at the beginning of time period t -> VALUES COME FROM THE RCCP MODEL VARIABLE FROM PREVIOUS ITERATION
-    r_td = copy(previous_r_td)
+    r_td = deepcopy(previous_r_td)
 
     # print model-suggested variable values in trace log file
     print_model_values_for_variables(logger, t, d, num_contracts, period_size, y, q_t, nbD, D, drivable, x_t, nbSt, ST, storage, g_t, h_t)
@@ -89,8 +89,8 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
     # No segundo caso, pode ser necessário, por ex, usar energia da bateria ou mesmo comprar
     # fora de contrato para fechar o período com o balanço positivo.
     # gap = sum (q_t'(.), x_t'(.), g_t'(.), e_t'(.), r_t'(.)) + Ŝ_ND + S_ND
-    sum_NDU = sum(P_hat_td[s] for s in NDU)  # Ŝ_ND : uncertain non-drivable power (comes from scenario data)
-    sum_ND = sum(n_drivable[s,:pORc][t] / period_size for s in ND)  # S_ND  FIXME Confirmar se eh pra dividir por delta
+    sum_NDU = (nbNDU > 0) ? sum(P_hat_td[s] for s in NDU) : ZERO  # Ŝ_ND : uncertain non-drivable power (comes from scenario data)
+    sum_ND = (nbND > 0) ? sum(n_drivable[s,:pORc][t] / period_size for s in ND) : ZERO  # S_ND  FIXME Confirmar se eh pra dividir por delta
 
     if verbose println(logger, "    POWER PRODUCTION / CONSUMPTION for microperiod :") end
     if verbose println(logger, "        [Ŝ_ND] Uncertain non-drivable devices : sum = $(sum_NDU) : $(P_hat_td)") end
@@ -115,10 +115,10 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
 		sum_q = 0.0
         q_td = zeros(Float64, num_contracts[t])
         for c in C_t
-            pi_minus_t = contracts_in_period_t[:min_period][c]
-            pi_plus_t = contracts_in_period_t[:max_period][c]
-            pi_minus_d = contracts_in_period_t[:min_delta][c]
-            pi_plus_d = contracts_in_period_t[:max_delta][c]
+            pi_minus_t = contracts_in_period_t[!, :min_period][c]
+            pi_plus_t = contracts_in_period_t[!, :max_period][c]
+            pi_minus_d = contracts_in_period_t[!, :min_delta][c]
+            pi_plus_d = contracts_in_period_t[!, :max_delta][c]
             if y[t, c] == 1
                 if pi_plus_t > 0
                     # buy contract  ==>> buy the minimum amount allowed in microperiod d or the minimum for period t / period_size
@@ -162,7 +162,9 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
         gap += sum_q
         # *** Use model values for drivable (variables x)
         x_td = calculate_model_value_for_x_td(drivable, nbD, D, period_size, t, d, x_t)
-        gap += sum((drivable[s,:pORc][t] / period_size) * x_td[s] for s in D)
+		if nbD > 0
+        	gap += sum((drivable[s,:pORc][t] / period_size) * x_td[s] for s in D)
+		end
         if verbose println(logger, "    Gap after full model usage (+ C_t + drivable_D) : $(gap)") end
         # BATTERY LEVELS WILL BE CALCULATED ON THE NORMAL RTCS ALGORITHM (NEXT SECTION)
     else
@@ -170,10 +172,10 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
         sum_q = 0.0
         q_td = zeros(Float64, num_contracts[t])
         for c in C_t  # min_use_per_delta
-            pi_minus_t = contracts_in_period_t[:min_period][c]
-            pi_plus_t = contracts_in_period_t[:max_period][c]
-            pi_minus_d = contracts_in_period_t[:min_delta][c]
-            pi_plus_d = contracts_in_period_t[:max_delta][c]
+            pi_minus_t = contracts_in_period_t[!, :min_period][c]
+            pi_plus_t = contracts_in_period_t[!, :max_period][c]
+            pi_minus_d = contracts_in_period_t[!, :min_delta][c]
+            pi_plus_d = contracts_in_period_t[!, :max_delta][c]
             if y[t, c] == 1
                 if pi_plus_t > 0
                     # buy contract  ==>> buy the minimum amount allowed in microperiod d or the minimum for period t / period_size
@@ -277,8 +279,8 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
 	for c in C_t
 		if y[t, c] == 1
 			if d == period_size
-				pi_plus_t = contracts_in_period_t[:max_period][c]
-				pi_plus_d = contracts_in_period_t[:max_delta][c]
+				pi_plus_t = contracts_in_period_t[!, :max_period][c]
+				pi_plus_d = contracts_in_period_t[!, :max_delta][c]
 				sum_q_t_c = previous_q_t[c] + q_td[c]
 				if pi_plus_t > 0  # buy contract
 					if !(sum_q_t_c - pi_plus_t <= EPS)
@@ -309,13 +311,21 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
     if verbose && e_td > ZERO println(logger, "    (e) e > 0") end
     # only sum contract fixed cost if d == 1 (first micro period)
     # FIXME Devo somar o custo dos dispositivos NDU no calculo do custo ?
-    cost = d == 1 ? sum( contract[contract[:period] .== t, :cost_fix][c] * y[t,c] for c in 1:num_contracts[t]) : ZERO
-    cost += sum(contract[contract[:period] .== t, :cost_var][c] * q_td[c] for c in 1:num_contracts[t])
-    cost += sum(drivable[s,:cost] * (drivable[s,:pORc][t] / period_size) * x_td[s] for s in D)
-    cost += sum(storage[s,:cost] * (g_td + h_td) for s in ST)
+    cost = d == 1 ? sum( contract[contract[!, :period] .== t, :cost_fix][c] * y[t,c] for c in 1:num_contracts[t]) : ZERO
+    cost += sum(contract[contract[!, :period] .== t, :cost_var][c] * q_td[c] for c in 1:num_contracts[t])
+	if size(drivable, 1) > 0
+    	cost += sum(drivable[s,:cost] * (drivable[s,:pORc][t] / period_size) * x_td[s] for s in D)
+	end
+	if size(storage, 1) > 0
+    	cost += sum(storage[s,:cost] * (g_td[s] + h_td[s]) for s in ST)
+	end
     cost += (period[t,:cost_out] * e_td)
-    cost += sum(n_drivable_uncertain[sigma, :cost] * P_hat_td[sigma] for sigma in SetSigma)
-    cost += sum(n_drivable[s,:cost] * n_drivable[s,:pORc][t] / period_size for s in ND)
+	if size(n_drivable_uncertain, 1) > 0
+    	cost += sum(n_drivable_uncertain[sigma, :cost] * P_hat_td[sigma] for sigma in SetSigma)
+	end
+	if size(n_drivable, 1) > 0
+    	cost += sum(n_drivable[s,:cost] * n_drivable[s,:pORc][t] / period_size for s in ND)
+	end
     if verbose println(logger, "    PERIOD COST                         : $(cost)") end
     flush(logger)
     return q_td, x_td, e_td, r_td, g_td, h_td, gap, cost  # values calculated by RTCS heuristic for period (t, d)
@@ -375,4 +385,5 @@ function print_model_values_for_variables(logger, t, d, num_contracts, period_si
     end
     println(logger, "        (g_t)  Model-suggested usage of batteries        : g = $(g_t); h = $(h_t)")
     println(logger, "        (g_td) Model-suggested usage of batteries (avg)  : g = $(g_td); h = $(h_td)")
+	flush(logger)
 end

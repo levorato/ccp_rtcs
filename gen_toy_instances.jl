@@ -563,7 +563,7 @@ end
     battery_costs = [0, 0.3, 0.6, 1.2, 2.4]  # the battery cost is usually 1/10 the cost of the cheapest energy contract
     unds_cost_amplitudes = ["default", "2x"]
     unds_shapes = ["skewed-left", "uniform", "skewed-right"]
-    output_path = create_full_dir(normpath(pwd()), ["instances", "toy"])
+    output_path = toy_instances_folder
 
     for unds_shape in unds_shapes
         for oc_value in OC_values

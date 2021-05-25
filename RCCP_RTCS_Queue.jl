@@ -73,14 +73,14 @@ end
 
 function retrieve_energy_gap_from_engaged_buy_contracts_enqueue(pq, contracts_in_period_t, period_size, C_t, y, t, gap, q_td, previous_q_t, logger, verbose)
     for c in C_t
-        pi_plus_t = contracts_in_period_t[:max_period][c]
-        pi_plus_d = contracts_in_period_t[:max_delta][c]
+        pi_plus_t = contracts_in_period_t[!, :max_period][c]
+        pi_plus_d = contracts_in_period_t[!, :max_delta][c]
         if y[t,c] == 1 && pi_plus_t > 0 # if the contract is active and is a 'buy' contract
             max_buy = min(pi_plus_d, pi_plus_t - previous_q_t[c])
             if abs(q_td[c]) < abs(max_buy) - EPS
                 # enqueue sorage elements by their cost
                 key = 'c' * string(c)
-                pq[key] = contracts_in_period_t[:cost_var][c]
+                pq[key] = contracts_in_period_t[!, :cost_var][c]
             else
                 if verbose println(logger, "        CANNOT retrieve energy from contract (c = $(c)). Exceeds limit of $(max_buy)") end
             end
@@ -164,16 +164,16 @@ end
 
 function sell_energy_gap_to_engaged_sell_contracts_enqueue(pq, contracts_in_period_t, period_size, C_t, y, t, gap, q_td, previous_q_t, logger, verbose)
     for c in C_t
-        pi_plus_t = contracts_in_period_t[:max_period][c]
-        pi_minus_t = contracts_in_period_t[:min_period][c]
-        pi_minus_d = contracts_in_period_t[:min_delta][c]
-        pi_plus_d = contracts_in_period_t[:max_delta][c]
+        pi_plus_t = contracts_in_period_t[!, :max_period][c]
+        pi_minus_t = contracts_in_period_t[!, :min_period][c]
+        pi_minus_d = contracts_in_period_t[!, :min_delta][c]
+        pi_plus_d = contracts_in_period_t[!, :max_delta][c]
         if y[t,c] == 1 && pi_plus_t < 0 # if the contract is active and is a 'sell' contract
             max_sell = -min(abs(pi_plus_d), abs(pi_plus_t) - abs(previous_q_t[c]))
             if abs(q_td[c]) < abs(max_sell) - EPS
                 # enqueue sorage elements by their cost
                 key = 'c' * string(c)
-                pq[key] = contracts_in_period_t[:cost_var][c]
+                pq[key] = contracts_in_period_t[!, :cost_var][c]
             else
                 if verbose println(logger, "        CANNOT sell energy to contract (c = $(c)). Exceeds limit of $(max_sell).") end
             end

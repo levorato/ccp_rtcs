@@ -1,6 +1,6 @@
 # =================================
 # RCCP_det.jl
-# RCCP Deterministic MILP Model
+# CCP Deterministic MILP Model
 # =================================
 
 using JuMP
@@ -12,12 +12,12 @@ using DataFrames
 # Include file reader and util functions
 include("RCCP_FileReader.jl")
 
-function solve_deterministic_model(filename::String, time_limit = 1800, verbose = false)
-    instance_as_dict = read_input_data(filename, verbose)
-    return solve_deterministic_model(instance_as_dict, time_limit, verbose)
+function solve_deterministic_model(filename::String, solver_params)
+    instance_as_dict = read_input_data(filename, false)
+    return solve_deterministic_model(instance_as_dict, solver_params)
 end
 
-function solve_deterministic_model(instance_as_dict::Dict, time_limit = 1800, verbose = false, cplex_old = false)
+function solve_deterministic_model(instance_as_dict::Dict, solver_params)
     instance = instance_as_dict["instance"]
     period = instance_as_dict["period"]
     contract = instance_as_dict["contract"]
@@ -28,7 +28,7 @@ function solve_deterministic_model(instance_as_dict::Dict, time_limit = 1800, ve
     scenarios = instance_as_dict["scenarios"]
 
     println("\n===========  D E T E R M I N I S T I C    M O D E L  ( t0 = 1 ) ===========\n")
-    println("\nSolving RCCP Deterministic model for t0 = 1...")
+    println("\nSolving CCP Deterministic model for t0 = 1...")
     # If there is any uncertain non-drivable device, include these devices to non-drivable list
     #   such that P = (Pmin + Pmax)/2
     if !isempty(n_drivable_uncertain)
@@ -42,7 +42,9 @@ function solve_deterministic_model(instance_as_dict::Dict, time_limit = 1800, ve
         showall(n_drivable)
     end
 
-    mdet = create_cplex_model(time_limit, cplex_old)
+    solver_parameters_2 = deepcopy(solver_params)
+    solver_parameters_2["relative-gap-tol"] = 1e-04  # Set relative gap tolerance to default solver value
+    mdet = create_jump_model(solver_parameters_2)
     # Instantiating the model indices
     println("Indices: $(instance)")
     nbT, nbS, nbC, nbD, nbND, nbSt = obtain_instance_parameters(instance)
@@ -82,7 +84,7 @@ function solve_deterministic_model(instance_as_dict::Dict, time_limit = 1800, ve
         @constraint(mdet, sum(q[c] for c in C if contract[c,:period] == t)
                         + sum(n_drivable[s,:pORc][t] for s in ND)
                         + sum(drivable[s,:pORc][t] * x[t, s] for s in D)
-                        + sum(h[t, s] for s in ST) - sum(g[t, s] for s in ST) + e[t] >= 0)
+                        + sum(storage[s,:lostCoef] * h[t, s] for s in ST) - sum(g[t, s] for s in ST) + e[t] >= 0)
     # FIXME: por que o balanco tem que >= 0 e nao exatamente == 0 ? Por conta dos sistemas de dissipacao?
     # FIXME: Isso pode gerar distorcoes do tipo: a cada t, o sistema vai enviar o maximo de energia (q[c])
     # FIXME: para a empresa eletrica, independente do que ele eh capaz de gerar...
@@ -157,39 +159,39 @@ function solve_deterministic_model(instance_as_dict::Dict, time_limit = 1800, ve
     #println(mdet)
 
     # Solve the problem
-    status = solve(mdet)
+    status = optimize!(mdet)
     # Print variables
     solution = Dict()
-    if status == :Optimal
+    if JuMP.termination_status(mdet) == MOI.OPTIMAL
         println("\n===========  S O L U T I O N ===========\n")
-        println("Optimal Objective Function value: ", getobjectivevalue(mdet))
-        println("Solve time : ", getsolvetime(mdet))
+        println("Optimal Objective Function value: ", objective_value(mdet))
+        println("Solve time : ", solve_time(mdet))
         sol_y = zeros(Int64, nbC)
         for c in C
-            sol_y[c] = trunc(Int, getvalue(y[c]))
+            sol_y[c] = trunc(Int, value(y[c]))
         end
         solution["y"] = sol_y
         if verbose
             println("Optimal Solutions:")
-            println("x = ", getvalue(x))
-            println("y = ", getvalue(y))
-            println("q = ", getvalue(q))
-            println("r = ", getvalue(r))
-            println("g = ", getvalue(g))
-            println("h = ", getvalue(h))
-            println("e = ", getvalue(e))
+            println("x = ", value.(x))
+            println("y = ", value.(y))
+            println("q = ", value.(q))
+            println("r = ", value.(r))
+            println("g = ", value.(g))
+            println("h = ", value.(h))
+            println("e = ", value.(e))
         end
-        return getobjectivevalue(mdet), solution, getsolvetime(mdet), (status == :Optimal ? true : false)
+        return objective_value(mdet), solution, solve_time(mdet), true
     else
-        println("Optimal solution not found! Best bound: ", getobjectivebound(mdet))
-        return getobjectivebound(mdet), solution, getsolvetime(mdet), (status == :Optimal ? true : false)
+        println("Optimal solution not found! Best bound: ", objective_bound(mdet))
+        return objective_bound(mdet), solution, solve_time(mdet), false
     end
 end
 
 # Solve the Deterministic RCCP MILP Model starting from period t0
 # Fix the contracts y according to fixed_contracts parameter, if parameter is given
 # Fix the initial battery levels (parameter "initial_battery"), if parameter is given
-function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger, infeasible_logger, time_limit = 1800, cplex_old = false, t0 = 1,
+function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger, infeasible_logger, solver_params, t0 = 1,
                                             fixed_contracts = Int64[], initial_battery = Float64[],
                                             previous_drivable_charge = Float64[])
     verbose = false
@@ -202,6 +204,8 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     storage = instance_as_dict["storage"]
     scenarios = instance_as_dict["scenarios"]
     filepath = instance_as_dict["filepath"]
+    # Rounding error allowed in RTCS Operations (e.g. battery and drivable storage / retrieval)
+    RTCS_ROUNDING_ERROR = solver_params["rtcs-rounding-error"]
 
     # If there is any uncertain non-drivable device, include these devices to non-drivable list
     #   such that P = (Pmin + Pmax)/2
@@ -244,14 +248,16 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     pi_minus = zeros(Float64, nbT, max_contracts_per_period)
     pi_plus = zeros(Float64, nbT, max_contracts_per_period)
     for t in 1:nbT
-        contracts_in_period_t = contract[contract[:period] .== t, :]
+        contracts_in_period_t = contract[contract[!, :period] .== t, :]
         for c in 1:num_contracts[t]
-            pi_minus[t, c] = contracts_in_period_t[:min_period][c]
-            pi_plus[t, c] = contracts_in_period_t[:max_period][c]
+            pi_minus[t, c] = contracts_in_period_t[!, :min_period][c]
+            pi_plus[t, c] = contracts_in_period_t[!, :max_period][c]
         end
     end
 
-    mdet = create_cplex_model(time_limit, cplex_old)
+    solver_parameters_2 = deepcopy(solver_params)
+    solver_parameters_2["relative-gap-tol"] = 1e-04  # Set relative gap tolerance to default solver value
+    mdet = create_jump_model(solver_parameters_2)
 
     # Instantiating the decision variables
     # (12) 1 if engages contract, 0 otherwise
@@ -328,7 +334,7 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     @constraint(mdet, c2[t = T], sum(q[t, c] for c in 1:num_contracts[t])
                         + sum(n_drivable[s,:pORc][t] for s in ND)
                         + sum(drivable[s,:pORc][t] * x[t, s] for s in D)
-                        + sum(h[t, s] for s in ST) - sum(g[t, s] for s in ST) + e[t] >= 0)
+                        + sum(storage[s,:lostCoef] * h[t, s] for s in ST) - sum(g[t, s] for s in ST) + e[t] >= 0)
     # FIXME: por que o balanco tem que >= 0 e nao exatamente == 0 ? Por conta dos sistemas de dissipacao?
     # FIXME: Isso pode gerar distorcoes do tipo: a cada t, o sistema vai enviar o maximo de energia (q[c])
     # FIXME: para a empresa eletrica, independente do que ele eh capaz de gerar...
@@ -359,11 +365,11 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
         end
     end
     # Buy contracts constraints
-#    @constraint(mdet, c9a[x = 1:size(buy_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] <= contract[contract[:period] .== buy_ct[x][1], :max_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
-#    @constraint(mdet, c9b[x = 1:size(buy_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] >= contract[contract[:period] .== buy_ct[x][1], :min_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
+#    @constraint(mdet, c9a[x = 1:size(buy_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] <= contract[contract[!, :period] .== buy_ct[x][1], :max_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
+#    @constraint(mdet, c9b[x = 1:size(buy_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] >= contract[contract[!, :period] .== buy_ct[x][1], :min_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
     # Sell contracts constraints
-#    @constraint(mdet, c9c[x = 1:size(sell_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] >= contract[contract[:period] .== buy_ct[x][1], :max_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
-#    @constraint(mdet, c9d[x = 1:size(sell_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] <= contract[contract[:period] .== buy_ct[x][1], :min_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
+#    @constraint(mdet, c9c[x = 1:size(sell_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] >= contract[contract[!, :period] .== buy_ct[x][1], :max_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
+#    @constraint(mdet, c9d[x = 1:size(sell_ct, 1)], q[buy_ct[x][1], buy_ct[x][2]] <= contract[contract[!, :period] .== buy_ct[x][1], :min_period][buy_ct[x][2]] * y[buy_ct[x][1], buy_ct[x][2]])
     min_period = zeros(Float64, nbT, max_contracts_per_period)
     max_period = zeros(Float64, nbT, max_contracts_per_period)
     for t in T
@@ -430,9 +436,9 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     # Solve the problem
     println("===================================================================\nSolving deterministic model for t0 = $(t0)...")
     # Save model to LP file
-    #output_path = joinpath(normpath(pwd()), "output", "models", "rccp_det_t" * string(t0) * ".lp")
+    #output_path = joinpath(normpath(EXPERIMENT_OUTPUT_FOLDER), "output", "models", "rccp_det_t" * string(t0) * ".lp")
     #writeLP(mdet, output_path)
-    status = solve(mdet)
+    status = optimize!(mdet)
     # Print variables
     solution = Dict()
     sol_y = zeros(Int64, nbT, max_contracts_per_period)
@@ -440,11 +446,13 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     for t in 1:nbT
         max_contracts_per_period = max(max_contracts_per_period, num_contracts[t])
     end
-    if status == :Optimal
+    if JuMP.termination_status(mdet) == MOI.OPTIMAL
+        rel_gap = MOI.get(mdet, MOI.RelativeGap())
         println("\n===========  D E T E R M I N I S T I C    S O L U T I O N  ( t0 = $(t0) ) ===========\n")
-        println("Optimal Objective Function value: ", getobjectivevalue(mdet))
-        println("Solve time : ", getsolvetime(mdet))
-        var_y = getvalue(y)
+        println("Optimal Objective Function value: ", objective_value(mdet))
+        println("Relative gap = $(rel_gap)")
+        println("Solve time : ", solve_time(mdet))
+        var_y = value.(y)
         if t0 > 1  # if starting from period > 1
             for t in 1:(t0-1), c in 1:num_contracts[t]
                 if size(fixed_contracts, 1) > 0
@@ -457,7 +465,7 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
             end
         end
         for t in T, c in 1:num_contracts[t]
-            sol_y[t,c] = trunc(Int, getvalue(y[t, c]))
+            sol_y[t,c] = trunc(Int, value(y[t, c]))
         end
         solution["y"] = sol_y
         # println("\namount consumed (< 0) / provided (> 0) by the client in contract i")
@@ -474,32 +482,81 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
         solution["x"] = capture_variable_solution_as_array_2d(x, t0, nbT, D)
         if verbose
             println("Optimal Solutions:")
-            println("x = ", getvalue(x))
-            println("y = ", getvalue(y))
-            println("q = ", getvalue(q))
-            println("r = ", getvalue(r))
-            println("g = ", getvalue(g))
-            println("h = ", getvalue(h))
-            println("e = ", getvalue(e))
+            println("x = ", value.(x))
+            println("y = ", value.(y))
+            println("q = ", value.(q))
+            println("r = ", value.(r))
+            println("g = ", value.(g))
+            println("h = ", value.(h))
+            println("e = ", value.(e))
+            flush(stdout)
         end
-        return getobjectivevalue(mdet), solution, getsolvetime(mdet), (status == :Optimal ? true : false)
-    else
+        return objective_value(mdet), solution, solve_time(mdet), true, rel_gap
+    elseif has_values(mdet) && (JuMP.termination_status(mdet) in [MOI.TIME_LIMIT, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED, MOI.LOCALLY_SOLVED])
+        # Recover the best integer solution found (suboptimal) and return it
+        rel_gap = MOI.get(mdet, MOI.RelativeGap())
+        println("\n===========  D E T E R M I N I S T I C    S O L U T I O N  ( t0 = $(t0) ) ===========\n")
+        println("SubOptimal Objective Function value: ", objective_value(mdet))
+        println("Relative gap = $(rel_gap)")
+        println("Solve time : ", solve_time(mdet))
+        println(general_logger, "[Deterministic Model, t0 = $(t0)] WARN: Time limit exceeded. Optimal solution not found! Best bound: ", objective_bound(mdet))
+        var_y = value.(y)
+        if t0 > 1  # if starting from period > 1
+            for t in 1:(t0-1), c in 1:num_contracts[t]
+                if size(fixed_contracts, 1) > 0
+                    sol_y[t,c] = fixed_contracts[t,c]
+                else
+                    sol_y[t,c] = -1
+                    println("WARN: Returning invalid contract solution y. Check RCCP Deterministic Model procedure !")
+                    println(general_logger, "[Det Model, t0 = $(t0)] WARN: Returning invalid contract solution y. Check RCCP Deterministic Model procedure !")
+                end
+            end
+        end
+        for t in T, c in 1:num_contracts[t]
+            sol_y[t,c] = trunc(Int, value(y[t, c]))
+        end
+        solution["y"] = sol_y
+        # println("\namount consumed (< 0) / provided (> 0) by the client in contract i")
+        solution["q"] = capture_variable_solution_as_array_2d_custom_q(q, t0, nbT, num_contracts)
+        # println("\namount stored in system s at the beginning of time period t ")
+        solution["r"] = capture_variable_solution_as_array_2d_custom_r(r, t0, nbT, ST)
+        # println("\namount absorbed by system s during the time period t and that will be already stored in system s at the end of this time period")
+        solution["g"] = capture_variable_solution_as_array_2d(g, t0, nbT, ST)
+        # amount refunded by system s during time period t and that was stored in system s at the beginning of this time period
+        solution["h"] = capture_variable_solution_as_array_2d(h, t0, nbT, ST)
+        # println("\nextra amount of electricity requested by the client to the parter (out of any engaged contract) in order to satisfy his needs at time period t")
+        solution["e"] = capture_variable_solution_as_array_1d(e, t0, nbT)
+        # println("\npercentage of time period p in which drivable system s is turned on")
+        solution["x"] = capture_variable_solution_as_array_2d(x, t0, nbT, D)
+        if verbose
+            println("SubOptimal Solutions:")
+            println("x = ", value.(x))
+            println("y = ", value.(y))
+            println("q = ", value.(q))
+            println("r = ", value.(r))
+            println("g = ", value.(g))
+            println("h = ", value.(h))
+            println("e = ", value.(e))
+            flush(stdout)
+        end
+        return objective_value(mdet), solution, solve_time(mdet), true, rel_gap
+    else  # Infeasible
         #env = CPLEX.Env()
         #CPLEX.set_logfile(env, "cplex.log")
         #println("$(CPLEX.getIIS())")
         #CPLEX.close_CPLEX(env)
         println(infeasible_logger, "t0 = $(t0); Infeasible det model : $(filepath)")
-        println("Optimal solution not found! Best bound: ", getobjectivebound(mdet))
-        println(general_logger, "[Det Model, t0 = $(t0)] WARN: Optimal solution not found! Best bound: ", getobjectivebound(mdet))
+        println("Optimal solution not found! Best bound: ", objective_bound(mdet))
+        println(general_logger, "[Det Model, t0 = $(t0)] WARN: Optimal solution not found! Best bound: ", objective_bound(mdet))
         solution["y"] = sol_y
-        return getobjectivebound(mdet), solution, getsolvetime(mdet), (status == :Optimal ? true : false)
+        return objective_bound(mdet), solution, solve_time(mdet), false, Inf
     end
 end
 
 function capture_variable_solution_as_array_1d(var_value, t0, nbT)
     var_sol = [Float64(0.0) for x=1:nbT]
     for x in t0:nbT
-        var_sol[x] = trunc_if_less_than_eps(getvalue(var_value[x]))
+        var_sol[x] = trunc_if_less_than_eps(value(var_value[x]))
     end
     return var_sol
 end
@@ -507,7 +564,7 @@ end
 function capture_variable_solution_as_array_2d(var_value, t0, nbT, range2)
     var_sol = [Float64(0.0) for x=1:nbT, y=range2]
     for x in t0:nbT, y in range2
-        var_sol[x, y] = trunc_if_less_than_eps(getvalue(var_value[x, y]))
+        var_sol[x, y] = trunc_if_less_than_eps(value(var_value[x, y]))
     end
     return var_sol
 end
@@ -519,7 +576,7 @@ function capture_variable_solution_as_array_2d_custom_q(var_value, t0, nbT, num_
     end
     var_sol = [Float64(0.0) for x=1:nbT, y=1:max_contracts_per_period]
     for x in t0:nbT, y in 1:num_contracts[x]
-        var_sol[x, y] = trunc_if_less_than_eps(getvalue(var_value[x, y]))
+        var_sol[x, y] = trunc_if_less_than_eps(value(var_value[x, y]))
     end
     return var_sol
 end
@@ -527,7 +584,7 @@ end
 function capture_variable_solution_as_array_2d_custom_r(var_value, t0, nbT, range2)
     var_sol = [Float64(0.0) for x=1:nbT+1, y=range2]
     for t in t0:nbT+1, y in range2
-        var_sol[t, y] = trunc_if_less_than_eps(getvalue(var_value[t, y]))
+        var_sol[t, y] = trunc_if_less_than_eps(value(var_value[t, y]))
     end
     return var_sol
 end

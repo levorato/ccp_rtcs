@@ -23,9 +23,8 @@ using DataFrames
 # Include file reader and util functions
 include("RCCP_FileReader.jl")
 
-function solve_robust_model_with_t(instance_as_dict::Dict, general_logger, infeasible_logger, time_limit = 1800,
-                                            cplex_old = false, t0 = 1,
-                                            fixed_contracts = Int64[], initial_battery = Float64[],
+function solve_robust_model_with_t(instance_as_dict::Dict, general_logger, infeasible_logger, solver_params,
+                                            t0 = 1, fixed_contracts = Int64[], initial_battery = Float64[],
                                             previous_drivable_charge = Float64[])
     verbose = false
     instance = instance_as_dict["instance"]
@@ -37,6 +36,8 @@ function solve_robust_model_with_t(instance_as_dict::Dict, general_logger, infea
     storage = instance_as_dict["storage"]
     scenarios = instance_as_dict["scenarios"]
     filepath = instance_as_dict["filepath"]
+    # Rounding error allowed in RTCS Operations (e.g. battery and drivable storage / retrieval)
+    RTCS_ROUNDING_ERROR = solver_params["rtcs-rounding-error"]
 
         # Instantiating the model indices
     println("Indices: $(instance)")
@@ -89,10 +90,10 @@ function solve_robust_model_with_t(instance_as_dict::Dict, general_logger, infea
     pi_minus = zeros(Float64, nbT, max_contracts_per_period)
     pi_plus = zeros(Float64, nbT, max_contracts_per_period)
     for t in 1:nbT
-        contracts_in_period_t = contract[contract[:period] .== t, :]
+        contracts_in_period_t = contract[contract[!, :period] .== t, :]
         for c in 1:num_contracts[t]
-            pi_minus[t, c] = contracts_in_period_t[:min_period][c]
-            pi_plus[t, c] = contracts_in_period_t[:max_period][c]
+            pi_minus[t, c] = contracts_in_period_t[!, :min_period][c]
+            pi_plus[t, c] = contracts_in_period_t[!, :max_period][c]
         end
     end
 
@@ -316,7 +317,7 @@ end
 
 datafile = "../notebooks/data/antoine/A_instance2_11scen.txt"
 instance_as_dict = read_input_data(datafile, false)
-general_logger = open("/tmp/rccp_concat_log.txt", "w+")
-infeasible_logger = open("/tmp/rccp_concat_log_infeasible.txt", "w+")
+general_logger = open(joinpath(tempdir(), "rccp_concat_log.txt"), "w+")
+infeasible_logger = open(joinpath(tempdir(), "rccp_concat_log_infeasible.txt"), "w+")
 solve_robust_model_with_t(instance_as_dict, general_logger, infeasible_logger)
 close(general_logger)
