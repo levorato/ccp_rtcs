@@ -19,8 +19,8 @@ if MACHINE == "laptop"
     home_prefix = "/Users/levorato"
     git_prefix = "doutorado"
   else
-    home_prefix = "/projetos/czt0"
-    git_prefix = "doutorado.old"
+    home_prefix = ".."
+    git_prefix = "doutorado"
   end
 else
   home_prefix = joinpath("C:\\", "Users", "Public")
