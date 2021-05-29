@@ -1,3 +1,6 @@
 /output/
 /venv/
 /output.old/
+rccp_experiments/
+notebooks/.ipynb_checkpoints/
+notebooks/__pycache__/

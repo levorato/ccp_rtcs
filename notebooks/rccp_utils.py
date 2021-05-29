@@ -81,7 +81,7 @@ def read_concatenated_trace_df(result_path):
     tempdir = tempfile.mkdtemp()
     for file in glob.glob(os.path.join(result_path.strip(), "*.zip")):
         if (pathlib.Path(file).suffix == ".zip"):
-            trace_file_zip = os.path.join(result_path.strip(), file)
+            trace_file_zip = file  # os.path.join(result_path.strip(), file)
             ##print("Reading zip file :", trace_file_zip, "...")
             output_file_trace_arrow = pathlib.Path(trace_file_zip).stem + ".arrow"
             try:
@@ -96,16 +96,16 @@ def read_concatenated_trace_df(result_path):
                             trace_df = feather.read_feather(tmppath)
                             df_list.append(trace_df)
                         except Exception as y1:
-                            ##print("ERROR Reading arrow file", f, ". Cause :", y1)
+                            print("ERROR Reading arrow file", f, ". Cause :", y1)
                             #arrow_file_obj.close()
-                            return pd.DataFrame()
+                            continue
                         #end
                 #end
                 r.close()
             except Exception as y2:
                 print("ERROR Reading ZIP trace file", file, ". Cause :", y2)
                 r.close()
-                return pd.DataFrame()
+                continue
             #end
         #end
     #end
