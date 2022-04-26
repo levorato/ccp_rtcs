@@ -31,8 +31,8 @@ for instance_group in instance_group_list
 		parsed_args["model"] = model
 		parsed_args["instances"] = instance_group
 		parsed_args["instance-name"] = "A_instance2_1NDU_Prod_1000s_skewed-right.txt"
-		parsed_args["simulation-nthreads"] = 12
-		parsed_args["final-scenario"] = 100
+		parsed_args["simulation-nthreads"] = 8
+		parsed_args["final-scenario"] = 1000
 		run_experiment(parsed_args)
 	end
 end

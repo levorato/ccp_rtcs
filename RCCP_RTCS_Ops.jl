@@ -166,7 +166,7 @@ function calculate_min_buy_given_contract_constraints(buy_qty, pi_minus_d, pi_mi
 	if sum_q_t_c - pi_plus_t > EPS
 		println("[RTCS] contract_buy : sum_q_t[c] > pi_plus_t : $(sum_q_t_c) > $(pi_plus_t) ")
 	end
-	@assert sum_q_t_c - pi_plus_t <= EPS "[RTCS] contract_buy : sum_q_t[c] <= pi_plus_t"
+	#@assert sum_q_t_c - pi_plus_t <= EPS "[RTCS] contract_buy : sum_q_t[c] <= pi_plus_t"
     return min_buy
 end
 
@@ -186,7 +186,7 @@ function calculate_min_sell_given_contract_constraints(sell_qty, pi_minus_d, pi_
 	if abs(sum_q_t_c) - abs(pi_plus_t) > EPS
 		println("[RTCS] contract_sell : sum_q_t[c] > pi_plus_t : $(sum_q_t_c) > $(pi_plus_t) ")
 	end
-	@assert abs(sum_q_t_c) - abs(pi_plus_t) <= EPS "[RTCS] contract_sell : sum_q_t[c] <= pi_plus_t"
+	#@assert abs(sum_q_t_c) - abs(pi_plus_t) <= EPS "[RTCS] contract_sell : sum_q_t[c] <= pi_plus_t"
     return min_sell
 end
 

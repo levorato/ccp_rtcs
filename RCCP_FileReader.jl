@@ -192,7 +192,7 @@ end
 # Reads all Japan microgrid scenarios (of uncertain devices) from CSV files, returning a concatenated dataframe.
 # 'season' (season of the year) parameter is optional, and can be used to filter the scenarios.
 function read_scenario_dataframes(instance_group, instance_name, non_drivable_list, numberOfPeriods, period_size_list, verbose = false)
-    println("[Japan instances] Reading scenarios from dataframe files...")
+    println("[Japan instances] Reading scenarios from dataframe files for instance_name = $(instance_name)...")
     scenario_folder = joinpath(instances_folder, "japan_microgrid", instance_group, "scenarios")
     csv_filelist = []
     for filename in searchdir(scenario_folder, ".csv.gz")
@@ -283,6 +283,7 @@ end
 function read_tabulated_data(filepath, instance_group, instance_name, verbose = false)
     # Read instance file
     println("Processing input file: $(filepath)...")
+    println("Processing instance_name: $(instance_name)...")
     file = open(filepath)
     text = ""
     bag = Dict()
@@ -574,7 +575,7 @@ function read_input_data(datafile, verbose = false)
         return read_xpress_file(datafile)
     elseif contains(s, "//")
         # Antoine tabulated format
-        return read_tabulated_data(datafile, verbose)
+        return read_tabulated_data(datafile, datafile, datafile, verbose)
     end
 end
 
@@ -638,7 +639,7 @@ function trunc_if_less_than_eps(value::Float64)
 end
 
 function create_trace_scenario_filename(model, Gamma_perc, test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
-    if model == "robust-budget"
+    if model == "robust-budget" || model == "deterministic"
         return model * "_$(Int64(ceil(Gamma_perc)))_" * test_name * "_" * instance_name * "_" * sim_strategy * "_" * model_policy * "_ReOpt-" * string(reoptimize) * "_scen" * string(scenario_id)
     else
         return model * "_" * test_name * "_" * instance_name * "_" * sim_strategy * "_" * model_policy * "_ReOpt-" * string(reoptimize) * "_scen" * string(scenario_id)

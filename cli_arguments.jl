@@ -77,6 +77,15 @@ function parse_commandline()
 			help="If true, resume simulations and reuse existing results saved to disk."
 			arg_type = Bool
 			default = true
+		"--gamma-values"
+			help="Gamma values for solving the deterministic or robust-budget CCP models."
+			default = [0, 20, 30, 40, 50, 60, 80, 100]
+		"--model-policy"
+			help = "Model policy to be used in the RTCS simulation ('ignore-model' or 'full-model')."
+			default = ["ignore_model", "full_model"]
+		"--sim-strategy"
+			help = "RTCS Strategy to be used in the simulation (['naive', 'conservative', 'audacious', 'cheapest'])."
+			default = ["naive", "conservative", "audacious", "cheapest"]
     end
 	parsed_args = parse_args(s)
 	println("Parsed command-line args:")

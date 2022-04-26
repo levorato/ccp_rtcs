@@ -12,34 +12,40 @@ using DataFrames
 # Include file reader and util functions
 include("RCCP_FileReader.jl")
 
-function solve_deterministic_model(filename::String, solver_params)
+function solve_deterministic_model(filename::String, solver_params, GammaPerc = 50)
     instance_as_dict = read_input_data(filename, false)
-    return solve_deterministic_model(instance_as_dict, solver_params)
+    return solve_deterministic_model(instance_as_dict, solver_params, GammaPerc)
 end
 
-function solve_deterministic_model(instance_as_dict::Dict, solver_params)
+function solve_deterministic_model(instance_as_dict::Dict, solver_params, GammaPerc = 50)
     instance = instance_as_dict["instance"]
     period = instance_as_dict["period"]
     contract = instance_as_dict["contract"]
     drivable = instance_as_dict["drivable"]
-    n_drivable = instance_as_dict["n_drivable"]
-    n_drivable_uncertain = instance_as_dict["n_drivable_uncertain"]
+    n_drivable = deepcopy(instance_as_dict["n_drivable"])
+    n_drivable_uncertain = deepcopy(nstance_as_dict["n_drivable_uncertain"])
     storage = instance_as_dict["storage"]
     scenarios = instance_as_dict["scenarios"]
 
-    println("\n===========  D E T E R M I N I S T I C    M O D E L  ( t0 = 1 ) ===========\n")
+    println("\n===========  D E T E R M I N I S T I C    M O D E L  ( t0 = 1, GammaPerc = $(GammaPerc) ) ===========\n")
     println("\nSolving CCP Deterministic model for t0 = 1...")
     # If there is any uncertain non-drivable device, include these devices to non-drivable list
     #   such that P = (Pmin + Pmax)/2
     if !isempty(n_drivable_uncertain)
-        println("\nWARN: Including uncertain non-drivable devices as normal non-drivable using average.")
+        println("\nWARN: Including uncertain non-drivable devices as normal non-drivable with P = Pmin + GammaPerc * (Pmax - Pmin).")
         # TODO FIXME fix the following line, uncommenting the code of size(...)
         for i in 1:size(n_drivable_uncertain, 1)
-            power = (n_drivable_uncertain[i, :Pmin] + n_drivable_uncertain[i, :Pmax]) / 2.0
+            power_diff = n_drivable_uncertain[i, :Pmax] - n_drivable_uncertain[i, :Pmin]
+            #if n_drivable_uncertain[i, :Pmax] >= 0 && n_drivable_uncertain[i, :Pmin] >= 0  # producer devices
+            power = n_drivable_uncertain[i, :Pmin] + power_diff * ((100.0 - GammaPerc) / 100.0)
+            #else  # consumer devices
+            #    power = n_drivable_uncertain[i, :Pmax] + power_diff * (GammaPerc / 100.0)
+            #end
             push!(n_drivable, [n_drivable_uncertain[i, :name], n_drivable_uncertain[i, :cost], power])
+            println("[UNDS $(i)] (Pmin, Pmax) = ($(n_drivable_uncertain[i, :Pmin]), $(n_drivable_uncertain[i, :Pmax])) => P = $(power)")
         end
         println("\nNEW Non Drivable dataframe:")
-        showall(n_drivable)
+        println(first(n_drivable, 5))
     end
 
     solver_parameters_2 = deepcopy(solver_params)
@@ -191,7 +197,7 @@ end
 # Solve the Deterministic RCCP MILP Model starting from period t0
 # Fix the contracts y according to fixed_contracts parameter, if parameter is given
 # Fix the initial battery levels (parameter "initial_battery"), if parameter is given
-function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger, infeasible_logger, solver_params, t0 = 1,
+function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger, infeasible_logger, solver_params, GammaPerc = 50, t0 = 1,
                                             fixed_contracts = Int64[], initial_battery = Float64[],
                                             previous_drivable_charge = Float64[])
     verbose = false
@@ -199,8 +205,8 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     period = instance_as_dict["period"]
     contract = instance_as_dict["contract"]
     drivable = instance_as_dict["drivable"]
-    n_drivable = instance_as_dict["n_drivable"]
-    n_drivable_uncertain = instance_as_dict["n_drivable_uncertain"]
+    n_drivable = deepcopy(instance_as_dict["n_drivable"])
+    n_drivable_uncertain = deepcopy(instance_as_dict["n_drivable_uncertain"])
     storage = instance_as_dict["storage"]
     scenarios = instance_as_dict["scenarios"]
     filepath = instance_as_dict["filepath"]
@@ -210,16 +216,20 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     # If there is any uncertain non-drivable device, include these devices to non-drivable list
     #   such that P = (Pmin + Pmax)/2
     if !isempty(n_drivable_uncertain)
-        println("\nWARN: Including uncertain non-drivable devices as normal non-drivable using average.")
+        println("\nWARN: Including uncertain non-drivable devices as normal non-drivable with P = Pmin + GammaPerc * (Pmax - Pmin).")
         # TODO FIXME fix the following line, uncommenting the code of size(...)
         for i in 1:size(n_drivable_uncertain, 1)
-            power = (n_drivable_uncertain[i, :Pmin] + n_drivable_uncertain[i, :Pmax]) / 2.0
+            power_diff = n_drivable_uncertain[i, :Pmax] - n_drivable_uncertain[i, :Pmin]
+            #if n_drivable_uncertain[i, :Pmax] >= 0 && n_drivable_uncertain[i, :Pmin] >= 0  # producer devices
+            power = n_drivable_uncertain[i, :Pmin] + power_diff * ((100.0 - GammaPerc) / 100.0)
+            #else  # consumer devices
+            #    power = n_drivable_uncertain[i, :Pmax] + power_diff * (GammaPerc / 100.0)
+            #end
             push!(n_drivable, [n_drivable_uncertain[i, :name], n_drivable_uncertain[i, :cost], power])
+            println("[UNDS $(i)] (Pmin, Pmax) = ($(n_drivable_uncertain[i, :Pmin]), $(n_drivable_uncertain[i, :Pmax])) => P = $(power)")
         end
-        if verbose
-            println("\nNEW Non Drivable dataframe:")
-            showall(n_drivable)
-        end
+        println("\nNEW Non Drivable dataframe:")
+        println(first(n_drivable, 5))
     end
 
     # Instantiating the model indices
@@ -231,7 +241,7 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     D = 1:nbD
     ND = 1:nbND
     ST = 1:nbSt
-    println("\n===========  D E T E R M I N I S T I C    M O D E L  ( t0 = $(t0) ) ===========\n")
+    println("\n===========  D E T E R M I N I S T I C    M O D E L  ( t0 = $(t0), GammaPerc = $(GammaPerc) ) ===========\n")
     println("Total number of periods is $(nbT)")
     println("Solve starting at period $(t0)")
 
@@ -448,7 +458,7 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     end
     if JuMP.termination_status(mdet) == MOI.OPTIMAL
         rel_gap = MOI.get(mdet, MOI.RelativeGap())
-        println("\n===========  D E T E R M I N I S T I C    S O L U T I O N  ( t0 = $(t0) ) ===========\n")
+        println("\n===========  D E T E R M I N I S T I C    S O L U T I O N  ( t0 = $(t0), GammaPerc = $(GammaPerc) ) ===========\n")
         println("Optimal Objective Function value: ", objective_value(mdet))
         println("Relative gap = $(rel_gap)")
         println("Solve time : ", solve_time(mdet))
@@ -495,7 +505,7 @@ function solve_deterministic_model_with_t(instance_as_dict::Dict, general_logger
     elseif has_values(mdet) && (JuMP.termination_status(mdet) in [MOI.TIME_LIMIT, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED, MOI.LOCALLY_SOLVED])
         # Recover the best integer solution found (suboptimal) and return it
         rel_gap = MOI.get(mdet, MOI.RelativeGap())
-        println("\n===========  D E T E R M I N I S T I C    S O L U T I O N  ( t0 = $(t0) ) ===========\n")
+        println("\n===========  D E T E R M I N I S T I C    S O L U T I O N  ( t0 = $(t0) ), GammaPerc = $(GammaPerc) ===========\n")
         println("SubOptimal Objective Function value: ", objective_value(mdet))
         println("Relative gap = $(rel_gap)")
         println("Solve time : ", solve_time(mdet))

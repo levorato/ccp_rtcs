@@ -176,18 +176,22 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
             pi_plus_t = contracts_in_period_t[!, :max_period][c]
             pi_minus_d = contracts_in_period_t[!, :min_delta][c]
             pi_plus_d = contracts_in_period_t[!, :max_delta][c]
+            contract_use_t = 0.5 * (pi_minus_t + pi_plus_t)
+            contract_use_d = 0.5 * (pi_minus_d + pi_plus_d)
             if y[t, c] == 1
                 if pi_plus_t > 0
                     # buy contract  ==>> buy the minimum amount allowed in microperiod d or the minimum for period t / period_size
 		    		# TODO Respect min and max per period and per delta! e.g. Contract	0	0.033	0.009	5000	7000	300	1200
                     # For each delta, must buy at least pi_minus_d, but in the last delta for the period, should have bought at least pi_minus_t !
-                    min_buy = max(pi_minus_d, (pi_minus_t / period_size))
+                    #min_buy = max(pi_minus_d, (pi_minus_t / period_size))
+                    min_buy = max(contract_use_d, ceil(contract_use_t / period_size))
 					min_buy = calculate_min_buy_given_contract_constraints(min_buy, pi_minus_d, pi_minus_t, pi_plus_d, pi_plus_t, (d == period_size), previous_q_t[c])
 					sum_q += min_buy
                     q_td[c] = min_buy
                     if verbose println(logger, "        Buying minimum energy amount from contract (c = $(c)) : qtd = $(min_buy)") end
                 else    # sell contract ==>> sell the minimum amount allowed in microperiod d
-					min_sell = -max(abs(pi_minus_d), abs((pi_minus_t / period_size)))  # TODO use the floor function to avoid propagating rounding errors
+					#min_sell = -max(abs(pi_minus_d), abs((pi_minus_t / period_size)))  # TODO use the floor function to avoid propagating rounding errors
+                    min_sell = -max(abs(contract_use_d), abs(ceil(contract_use_t / period_size)))  # TODO use the floor function to avoid propagating rounding errors
 					min_sell = calculate_min_sell_given_contract_constraints(min_sell, pi_minus_d, pi_minus_t, pi_plus_d, pi_plus_t, (d == period_size), previous_q_t[c])
                     sum_q += min_sell
                     q_td[c] = min_sell
@@ -219,7 +223,7 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
                     C_t, y, q_td, previous_q_t, t, d, drivable, D, nbT, x_td, previous_drivable_charge, storage, ST, r_td, g_td, h_td, gap,
                     logger, verbose)
         else
-            if sim_strategy == "conservative"
+            if (sim_strategy == "conservative") || (sim_strategy == "naive")
                 # try to store the energy gap in the batteries
                 gap, r_td, g_td = store_energy_gap_in_batteries(storage, ST, gap, r_td, g_td, logger, verbose)
                 # if there is still energy left over, sell via 'Sell' contracts
@@ -249,7 +253,7 @@ function rtcs(t, d, period_size, sim_strategy, model_policy, instance_as_dict, P
                     period_size, C_t, y, q_td, previous_q_t, t, d, drivable, D, nbT, x_td, previous_drivable_charge, storage, ST,
                     r_td, g_td, h_td, gap, logger, verbose)
         else
-            if sim_strategy == "audacious"  # "BCD", "BDC", "CBD", "CDB", "DBC", "DCB"
+            if (sim_strategy == "audacious") || (sim_strategy == "naive")  # "BCD", "BDC", "CBD", "CDB", "DBC", "DCB"
                 # get extra energy from batteries, if they exist
                 gap, r_td, h_td = retrieve_energy_gap_from_batteries(storage, ST, gap, r_td, h_td, logger, verbose)
                 # if still needs energy, try to buy from any engaged contract

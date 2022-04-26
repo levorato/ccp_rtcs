@@ -81,13 +81,13 @@ function process_individual_scenario(scenario_id, scenario, general_simulation_p
     trace_df_list = Array[]
     # Run optimization models or obtain solution values if already stored in file
     opt_df_t1 = obtain_robust_optimization_model_results(base_simulation_dir, test_name, model, instance_name,
-        instance_as_dict, time_limit, general_simulation_parameters, general_logger)
-    if model == "robust-budget"  # Retrieve model result for a specific value of budget Gamma
+        instance_as_dict, time_limit, general_simulation_parameters, general_logger, Gamma_perc)
+    if model == "robust-budget" || model == "deterministic"  # Retrieve model result for a specific value of budget Gamma
         opt_df_t1 = opt_df_t1[(opt_df_t1[!, :GammaPerc] .== Gamma_perc), :]
         if nrow(opt_df_t1) == 0
-            println(general_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for budget model Gamma% = $(Gamma_perc).")
-            println(scenario_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for budget model Gamma% = $(Gamma_perc).")
-            println("[Thread $(tid)] ERROR: No existing optimal model solution found for budget model Gamma% = $(Gamma_perc).")
+            println(general_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for $(model) model Gamma% = $(Gamma_perc).")
+            println(scenario_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for $(model) model Gamma% = $(Gamma_perc).")
+            println("[Thread $(tid)] ERROR: No existing optimal model solution found for $(model) model Gamma% = $(Gamma_perc).")
         end
     elseif nrow(opt_df_t1) == 0
         println(general_logger, "[Thread $(tid)] ERROR: No existing optimal model solution found for the requested model.")
@@ -156,7 +156,7 @@ function process_individual_scenario(scenario_id, scenario, general_simulation_p
                     t1 = time_ns()  # ******************** measure start time
                     model_value_reopt, model_solution_reopt, solve_time_reopt, status_reopt, gap_reopt =
                             re_optimize_deterministic(instance_as_dict, time_limit, general_simulation_parameters, t, y_model,
-                                previous_batt_levels_model, previous_drivable_charge_model, general_logger)
+                                previous_batt_levels_model, previous_drivable_charge_model, general_logger, Gamma_perc)
                     model_value_for_period = model_value_reopt
                     model_opt_time_spent = solve_time_reopt
                     model_solution = model_solution_reopt
@@ -322,34 +322,36 @@ function process_existing_scenario_runs(simulation_args, run_scenario_list, mode
                 model, Gamma_perc, test_name, instance_name, sim_strategy, model_policy, reoptimize, scenario_id)
         output_file_base = joinpath(normpath(simulation_log_dir), scenario_subpath)
         output_file_trace_zip = output_file_base * ".zip"
-	output_file_trace_arrow = scenario_subpath * ".arrow"
+        output_file_trace_arrow = scenario_subpath * ".arrow"
         # If both arrow files exist, skips the execution of this scenario
         if isfile(output_file_trace_zip)
-	    found = false
+            found = false
             try
-	    	r = ZipFile.Reader(output_file_trace_zip)
-		for f in r.files
-			if GetFileExtension(f.name) == ".arrow" && (f.name == output_file_trace_arrow)
-				temp_df = DataFrame(Arrow.Table(f))
-				if nrow(temp_df) > 0
-					push!(reuse_scenario_id_list, scenario_id)
-					found = true
-				end
-				break
-			end
-		end
+                r = ZipFile.Reader(output_file_trace_zip)
+                for f in r.files
+                    if GetFileExtension(f.name) == ".arrow" && (f.name == output_file_trace_arrow)
+                        #temp_df = DataFrame(Arrow.Table(f))
+                        #if nrow(temp_df) > 0
+                        #    push!(reuse_scenario_id_list, scenario_id)
+                        #    found = true
+                        #end
+						found = true
+                        break
+                    end
+                end
+                close(r)
             catch exc
-	    	println("Error reading zip trace file: $(exc).")
+                println("Error reading zip trace file: $(exc).")
             end
-	    if !found
-		push!(filtered_scenario_id_list, scenario_id)
-	    end
+            if !found
+                push!(filtered_scenario_id_list, scenario_id)
+            end
         else
             push!(filtered_scenario_id_list, scenario_id)
         end
     end
     println("Reusing simulation for scenarios: $(reuse_scenario_id_list)")
-	flush(stdout)
+    flush(stdout)
     if size(filtered_scenario_id_list, 1) > 0
         new_run_scenario_list = [x for x in run_scenario_list if (x[1] in filtered_scenario_id_list)]
         new_run_scenario_ids = [x[1] for x in run_scenario_list if (x[1] in filtered_scenario_id_list)]
@@ -476,7 +478,7 @@ end
 # Simulate the RTCS for a given microgrid 'instance_name', based on a given CCP 'model'.
 function simulate_instance(model, test_name, instance_name, instance_as_dict, general_simulation_parameters;
         scenario_filter = Int64[], save_trace_info = false, model_policy_list = ["ignore_model", "full_model"], # "batteries", "batteries_and_drivable"
-        sim_strategy_list = ["conservative", "audacious", "cheapest"], reoptimize_values = [false, true])
+        sim_strategy_list = ["naive", "conservative", "audacious", "cheapest"], reoptimize_values = [false, true])
 
     df = DataFrame(Instance = String[], TestName = String[], ModelName = String[],
         Strategy = String[], Reoptimize = Bool[], TimeSpent = Float64[],
@@ -510,7 +512,7 @@ function simulate_instance(model, test_name, instance_name, instance_as_dict, ge
         # Run RTCS Simulation
         total_p_time = 0.0
         gamma_list = [0]
-        if model == "robust-budget"
+        if model == "robust-budget" || model == "deterministic"
             gamma_list = general_simulation_parameters["gamma-values"]
         end
         # Setup initial and final scenario numbers in simulation
@@ -526,8 +528,8 @@ function simulate_instance(model, test_name, instance_name, instance_as_dict, ge
                         reopt_values = [false]
                     end
                     for reopt in reopt_values
-                        println("\nSimulation for Gamma=$(Gamma_perc) x $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
-                        println(scenario_logger, "Simulation for Gamma=$(Gamma_perc) x $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
+                        println("\nSimulation for $(model) x Gamma=$(Gamma_perc) x $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
+                        println(scenario_logger, "Simulation for $(model) x Gamma=$(Gamma_perc) x $(sim_strategy) x $(model_policy) x ReOpt=$(string(reopt))")
 						flush(stdout)
 						flush(scenario_logger)
                         instance_simulation_parameters = Dict("sim_strategy"=>sim_strategy, "reoptimize"=>reopt, "model_policy"=>model_policy,

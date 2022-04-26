@@ -36,7 +36,7 @@ for instance_group in instance_group_list
 		end
 		parsed_args["model"] = model
 		parsed_args["instances"] = instance_group
-		parsed_args["instance-name"] = "instance_deltamin10_winter.txt"
+		parsed_args["instance-name"] = "instance_deltamin10_spring.txt"
 		parsed_args["simulation-nthreads"] = 8
 		parsed_args["final-scenario"] = 1000
 		parsed_args["model-policy"] = ["ignore_model"]

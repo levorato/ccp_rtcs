@@ -18,7 +18,7 @@ parsed_args["output-folder"] = EXPERIMENT_OUTPUT_FOLDER
 parsed_args["what"] = "solve"
 parsed_args["solver-verbose"] = true
 parsed_args["solver-time-limit"] = 28800.0  # 8h time-limit
-parsed_args["max-cores"] = 16
+parsed_args["max-cores"] = 8
 parsed_args["gamma-values"] = [0, 20, 40, 50, 60, 80, 100]
 
 # Solve models
@@ -29,6 +29,7 @@ for instance_group in instance_group_list
 	for model in models_to_solve
 		parsed_args["model"] = model
 		parsed_args["instances"] = instance_group
+		parsed_args["instance-name"] = "instance_deltamin10_winter.txt"
 		parsed_args["relative-gap-tol"] = 1e-5
 		run_experiment(parsed_args)
 	end

@@ -62,6 +62,9 @@ function get_instance_list(instance_group, instance_name)
 			inputfile = joinpath("$(base_folder)", "$(filename)")
 			push!(instance_list, (filename, inputfile))
 		end
+	elseif occursin("a_instance", lowercase(instance_group))
+		inputfile = joinpath("$(antoine_instances_folder)", "$(instance_group)")
+		push!(instance_list, (instance_group, inputfile))
 	else
 		println("WARN: No instances found!")
 	end
@@ -98,13 +101,16 @@ function run_experiment(parsed_args = nothing)
 	initial_scenario = parsed_args["initial-scenario"]
 	final_scenario = parsed_args["final-scenario"]
 	resume = parsed_args["resume"]
+	model_policy_list = parsed_args["model-policy"]
+	sim_strategy_list = parsed_args["sim-strategy"]
 	#num_runs = parsed_args["num-runs"]
-	parsed_args["gamma-values"] = [0, 20, 40, 60, 80, 100]
 	println("Resume simulations? $(resume)")
 	println("Number of available threads: $(Threads.nthreads())")
 	println("Running CCP Experiment for instance_group = $(instance_group) and model = $(model)...")
-	if model == "robust-budget"
-		println("[Budget] Will process Gamma% = $(parsed_args["gamma-values"]).")
+	println("Model policy list: $(model_policy_list)")
+	println("RTCS Strategy list: $(sim_strategy_list)")
+	if model == "robust-budget" || model == "deterministic"
+		println("[$(model)] Will process Gamma% = $(parsed_args["gamma-values"]).")
 	end
 	instance_list = get_instance_list(instance_group, instance_name)
 	seed = rand(Int, 2)[1]
@@ -127,12 +133,21 @@ function run_experiment(parsed_args = nothing)
 			println("Date: $(datetimenow)")
 			if inputfile != prev_inputfile
 				println("***** Processing instance = $(filename) *****")
-				instance_as_dict = read_tabulated_data(inputfile, instance_group, instance_name)
+				instance_as_dict = read_tabulated_data(inputfile, instance_group, filename)
 			end
 			println("Calculating $(model) model solution (instance = $(filename))...")
 			flush(stdout)
-			obtain_robust_optimization_model_results(parsed_args["base_output_path"], instance_group, model, filename,
-					instance_as_dict, solver_time_limit, parsed_args, scenario_logger)
+			if model == "robust-box"
+				println("Solving for $(model)...")
+				obtain_robust_optimization_model_results(parsed_args["base_output_path"], instance_group, model, filename,
+					instance_as_dict, solver_time_limit, parsed_args, scenario_logger, [0])
+			else
+				for Gamma_perc in parsed_args["gamma-values"]
+					println("Solving for Gamma_perc = $(Gamma_perc)...")
+					obtain_robust_optimization_model_results(parsed_args["base_output_path"], instance_group, model, filename,
+						instance_as_dict, solver_time_limit, parsed_args, scenario_logger, Gamma_perc)
+				end
+			end
 			flush(stdout)
 			prev_inputfile = inputfile
 			flush(scenario_logger)
@@ -146,11 +161,12 @@ function run_experiment(parsed_args = nothing)
 			println("Date: $(datetimenow)")
 			if inputfile != prev_inputfile
 				println("***** Processing instance = $(filename) *****")
-				instance_as_dict = read_tabulated_data(inputfile, instance_group, instance_name)
+				instance_as_dict = read_tabulated_data(inputfile, instance_group, filename)
 			end
 			println("Simulating RTCS for model $(model) and instance = $(filename))...")
 			flush(stdout)
-			simulate_instance(model, instance_group, filename, instance_as_dict, parsed_args)
+			simulate_instance(model, instance_group, filename, instance_as_dict, parsed_args;
+								model_policy_list=model_policy_list, sim_strategy_list=sim_strategy_list)
 			flush(stdout)
 			prev_inputfile = inputfile
 		end

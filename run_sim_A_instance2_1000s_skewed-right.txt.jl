@@ -15,14 +15,17 @@ parsed_args["output-folder"] = abspath(create_full_dir(normpath(output_folder),
 	[EXPERIMENT_NAME]))
 
 # Solve models
-#parsed_args["what"] = "solve"
-#parsed_args["solver-verbose"] = true
-#parsed_args["solver-time-limit"] = 28800.0  # 8h time-limit
-#parsed_args["max-cores"] = 16
-#parsed_args["instances"] = "antoine-skew"
+parsed_args["what"] = "solve"
+parsed_args["solver-verbose"] = true
+parsed_args["solver-time-limit"] = 28800.0  # 8h time-limit
+parsed_args["max-cores"] = 16
+parsed_args["instances"] = "A_instance2_1000s_skewed-right.txt"
+parsed_args["model"] = "robust-budget"
+run_experiment(parsed_args)
+exit()
 
 # Simulate based on existing model results
-models_to_simulate = ["robust-budget", "robust-box", "deterministic"]
+models_to_simulate = ["robust-budget"]  # ["robust-box", "deterministic", "robust-budget"]
 instance_group_list = ["antoine-skew"]
 parsed_args["what"] = "simulate"
 parsed_args["forecast-type"] = "average"  # average-based RTCS forecast
@@ -31,8 +34,8 @@ for instance_group in instance_group_list
 		parsed_args["model"] = model
 		parsed_args["instances"] = instance_group
 		parsed_args["instance-name"] = "A_instance2_1000s_skewed-right.txt"
-		parsed_args["simulation-nthreads"] = 12
-		parsed_args["final-scenario"] = 100
+		parsed_args["simulation-nthreads"] = 8
+		parsed_args["final-scenario"] = 500
 		run_experiment(parsed_args)
 	end
 end

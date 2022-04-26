@@ -30,10 +30,12 @@ function re_optimize_robust(model, instance_as_dict, time_limit, solver_paramete
 	solver_parameters_2["max-cores"] = 2
 	if model == "robust-box"
 		println("Reoptimizing robust box model.")
+		flush(stdout)
     	rob_value, rob_solution, solve_time, status, gap = solve_robust_model_box(instance_as_dict, general_logger,
             infeasible_logger, solver_parameters_2, t, y, initial_battery, previous_drivable_charge)
 	else  # robust-budget
 		println("Reoptimizing robust budget model for Gamma = $(Gamma).")
+		flush(stdout)
         rob_value, rob_solution, solve_time, status, gap = solve_robust_model_budget(instance_as_dict, general_logger,
 			infeasible_logger, solver_parameters_2, Gamma, t, y, initial_battery, previous_drivable_charge)
 	end
@@ -42,7 +44,7 @@ function re_optimize_robust(model, instance_as_dict, time_limit, solver_paramete
 end
 
 function re_optimize_deterministic(instance_as_dict, time_limit, solver_parameters, t, y,
-        initial_battery, previous_drivable_charge, general_logger)
+        initial_battery, previous_drivable_charge, general_logger, Gamma_perc)
     # Solve the Deterministic Model starting from t', fixing the contracts variable y
     output_file_inf_log = get_infeasible_log_path(solver_parameters)
     infeasible_logger = open(output_file_inf_log, "a+")
@@ -52,9 +54,10 @@ function re_optimize_deterministic(instance_as_dict, time_limit, solver_paramete
 	# allow only 2 reoptimization threads per simulation run
 	solver_parameters_2["max-cores"] = 2
     det_value, det_solution, det_solve_time, det_status, det_gap = solve_deterministic_model_with_t(instance_as_dict,
-            general_logger, infeasible_logger, solver_parameters_2, t, y, initial_battery, previous_drivable_charge)
+            general_logger, infeasible_logger, solver_parameters_2, Gamma_perc, t, y, initial_battery, previous_drivable_charge)
     close(infeasible_logger)
-    println("Resolvido model det para t = $(t), opt = $(det_status)")
+    println("Solved model det for t = $(t), opt = $(det_status)")
+	flush(stdout)
     return det_value, det_solution, det_solve_time, det_status, det_gap
 end
 
@@ -97,7 +100,8 @@ function create_empty_opt_dataframe(model)
             e_ = Array{Float64, 1}[], r0 = Array{Float64, 1}[], r_ = Array{Float64, 1}[],
             g0 = Array{Float64, 1}[], g_ = Array{Float64, 1}[], RelGap = Float64[])
 	else  #if model == "deterministic"  # solve the deterministic model
-        return DataFrame(Instance = String[], ScenarioId = Int64[], PeriodId = Int64[], Model = String[], ObjValue = Float64[],
+        return DataFrame(Instance = String[], ScenarioId = Int64[], PeriodId = Int64[], Model = String[],
+		    GammaPerc = Float64[], ObjValue = Float64[],
             Solution = Array{Int64, 1}[], ModelTime = Float64[], Optimal = Bool[],
             q = Array{Float64, 1}[], x = Array{Float64, 1}[], e = Array{Float64, 1}[],
             r = Array{Float64, 1}[], g = Array{Float64, 1}[], h = Array{Float64, 1}[], RelGap = Float64[])
@@ -109,7 +113,7 @@ end
 # Returns a dataframe with all results obtained.
 function run_robust_optimization_models(model, instance_name, instance_as_dict, solver_parameters, general_logger, infeasible_logger)
     # Open output CSV file for results
-    file_prefix = "CCP_model_$(model)"
+    file_prefix = "CCP_model_$(model)_$(instance_name)"
 	tid = Threads.threadid()
     full_filename = "$(file_prefix)_thread_$(tid).csv"
 	opt_output_path = solver_parameters["base_output_path"]
@@ -144,7 +148,7 @@ function run_robust_optimization_models(model, instance_name, instance_as_dict, 
 		df_list = []
         for Gamma_perc in gamma_values
             Gamma = (Gamma_perc * nbNDU * nbT) / 100.0
-            println("Gamma% = $(Gamma_perc) => Gamma = $(Gamma)")
+            println("[Budget] Gamma% = $(Gamma_perc) => Gamma = $(Gamma)")
             flush(stdout)
             # Solve the robust model starting from t = 1
             rob_value_t1, rob_solution_t1, rob_solve_time_t1, rob_status_t1, gap_t1 = solve_robust_model_budget(instance_as_dict,
@@ -157,25 +161,38 @@ function run_robust_optimization_models(model, instance_name, instance_as_dict, 
 			opt_df = store_optimization_results_in_dataframe(model, instance_name, instance_as_dict, -1, 1, rob_value_t1, rob_solution_t1,
 			                                        rob_solve_time_t1, rob_status_t1, gap_t1, general_logger, Gamma_perc, Gamma)
 			push!(df_list, opt_df)
-			save_optimization_results_dataframe_to_file(opt_output_path, "robust-budget", instance_name, opt_df, general_logger)
+			save_optimization_results_dataframe_to_file(opt_output_path, "robust-budget", instance_name, opt_df, general_logger, Gamma_perc)
         end
         close(result_file)
         return vcat(df_list...)
     else  #if model == "deterministic"  # solve the deterministic model
-        # Solve the robust model only from t = 1 (no reoptimization)
-        # Solve the Deterministic model starting from t = 1
-        det_value_t1, det_solution_t1, det_solve_time_t1, det_status_t1, gap_t1 = solve_deterministic_model_with_t(instance_as_dict, general_logger,
-                    infeasible_logger, parsed_args, 1)
-        y = det_solution_t1["y"]
-        println("Solution: y = $(y)")
-        println(result_file, "$(model),$(instance_name),none,$(det_value_t1),$(det_solve_time_t1),$(det_status_t1),$(y),$(gap_t1)")
-        flush(result_file)
-        close(result_file)
-        # Save data for t = 1
-		opt_df = store_optimization_results_in_dataframe(model, instance_name, instance_as_dict, -1, 1, det_value_t1, det_solution_t1,
-		                                        det_solve_time_t1, det_status_t1, gap_t1, general_logger)
-        save_optimization_results_dataframe_to_file(opt_output_path, "deterministic", instance_name, opt_df, general_logger)
-        return opt_df
+		gamma_values = solver_parameters["gamma-values"]
+	    run_list = get_list_of_missing_results(instance_name, result_df, gamma_values)
+        println("Processing experiment for gamma_values = $(gamma_values).")
+        nbT, nbS, nbC, nbD, nbND, nbSt = obtain_instance_parameters(instance_as_dict["instance"])
+        nbNDU = size(instance_as_dict["n_drivable_uncertain"], 1)
+        df_list = []
+        for Gamma_perc in gamma_values
+            Gamma = (Gamma_perc * nbNDU * nbT) / 100.0
+            println("[Deterministic] Gamma% = $(Gamma_perc) => Gamma = $(Gamma)")
+            flush(stdout)
+	        # Solve the robust model only from t = 1 (no reoptimization)
+	        # Solve the Deterministic model starting from t = 1
+	        det_value_t1, det_solution_t1, det_solve_time_t1, det_status_t1, gap_t1 = solve_deterministic_model_with_t(instance_as_dict, general_logger,
+	                    infeasible_logger, parsed_args, Gamma_perc, 1)
+	        y = det_solution_t1["y"]
+	        println("Solution: y = $(y)")
+	        println(result_file, "$(model),$(instance_name),$(Gamma_perc),$(det_value_t1),$(det_solve_time_t1),$(det_status_t1),$(y),$(gap_t1)")
+			flush(stdout)
+	        flush(result_file)
+	        # Save data for t = 1
+			opt_df = store_optimization_results_in_dataframe(model, instance_name, instance_as_dict, -1, 1, det_value_t1, det_solution_t1,
+			                                        det_solve_time_t1, det_status_t1, gap_t1, general_logger, Gamma_perc, Gamma)
+			push!(df_list, opt_df)
+	        save_optimization_results_dataframe_to_file(opt_output_path, "deterministic", instance_name, opt_df, general_logger, Gamma_perc)
+		end
+		close(result_file)
+        return vcat(df_list...)
     end
 end
 
@@ -195,7 +212,7 @@ function store_optimization_results_in_dataframe(model, instance_name, instance_
     # only store results if solution if optimal
     if haskey(model_solution, "y") && (rel_gap != Inf)
 		if model == "deterministic"  # Instance;ScenarioId;PeriodId;Model;ObjValue;Solution;ModelTime;Optimal;q;x;e;r;g;h;RelGap
-	        push!(opt_df, [instance_name, scenario_id, period_id, model,
+	        push!(opt_df, [instance_name, scenario_id, period_id, model, Gamma_perc,
 				obj_value, flatten_solution(model_solution["y"]),
 	            model_solve_time, status_opt,
 	            flatten_solution(model_solution["q"]), flatten_solution(model_solution["x"]), flatten_solution(model_solution["e"]),
@@ -231,7 +248,7 @@ function store_optimization_results_in_dataframe(model, instance_name, instance_
         end
         sol_y = zeros(Int64, nbT, max_c)
 		if model == "deterministic"
-	        push!(opt_df, [instance_name, scenario_id, period_id, model, obj_value, flatten_solution(sol_y),
+	        push!(opt_df, [instance_name, scenario_id, period_id, model, Gamma_perc, obj_value, flatten_solution(sol_y),
 	            model_solve_time, status_opt,
 				flatten_solution([Float64(0.0) for x=1:nbT, y=1:max_c]), flatten_solution([Float64(0.0) for x=1:nbT, y=D]), flatten_solution([Float64(0.0) for x=1:nbT]),
 	            flatten_solution([Float64(0.0) for x=1:nbT+1, y=ST]), flatten_solution([Float64(0.0) for x=1:nbT, y=ST]), flatten_solution([Float64(0.0) for x=1:nbT, y=ST]), Inf])
@@ -256,6 +273,8 @@ function store_optimization_results_in_dataframe(model, instance_name, instance_
 	            flatten_solution([Float64(0.0) for x=1:nbT, y=ST]), flatten_solution([Float64(0.0) for x=1:nbT, y=ST, z=1:nbT, k=SetSigma]), Inf])
 		end
     end
+	flush(stdout)
+	flush(general_logger)
 	return opt_df
 end
 
@@ -528,8 +547,12 @@ function calculate_model_variable_delta(q, x, e, g, period_size, d, calc_method 
     end
 end
 
-function get_optimization_result_base_filename(opt_output_path, model, instance_name)
-    return joinpath(normpath(opt_output_path), "RCCP_Sim_OptData_$(model)_$(instance_name)")
+function get_optimization_result_base_filename(opt_output_path, model, instance_name, GammaPerc)
+	if model == "robust-budget" || model == "deterministic"
+		return joinpath(normpath(opt_output_path), "RCCP_Sim_OptData_$(model)-$(GammaPerc)_$(instance_name)")
+	else
+	    return joinpath(normpath(opt_output_path), "RCCP_Sim_OptData_$(model)_$(instance_name)")
+	end
 end
 
 function GetFileExtension(filename)
@@ -537,35 +560,37 @@ function GetFileExtension(filename)
 end
 
 function obtain_robust_optimization_model_results(opt_output_path, test_name, model, instance_name,
-		instance_as_dict, time_limit, solver_parameters, general_logger)
-    base_filename = get_optimization_result_base_filename(opt_output_path, model, instance_name)
+		instance_as_dict, time_limit, solver_parameters, general_logger, Gamma_perc = 0.0)
+    base_filename = get_optimization_result_base_filename(opt_output_path, model, instance_name, Gamma_perc)
 	tid = Threads.threadid()
     opt_var_file = base_filename * ".jld"
     opt_csv_file = base_filename * ".csv"
     opt_file_zip = base_filename * ".zip"
     opt_file_arrow = base_filename * ".arrow"
     tmp_file_path = joinpath(tempdir(), base_filename * "_opt_df_thread_$(tid).jld")
-    #println(general_logger, "Trying to obtain robust model results from:")
-	#println(general_logger, " - Option 1: $(opt_var_file)")
-	#println(general_logger, " - Option 2: $(opt_file_zip)")
-	#println(general_logger, " - Option 3: $(opt_file_arrow)")
+    println(general_logger, "Trying to obtain robust model results from:")
+	println(general_logger, " - Option 1: $(opt_var_file)")
+	println(general_logger, " - Option 2: $(opt_file_zip)")
+	println(general_logger, " - Option 3: $(opt_file_arrow)")
 	opt_df = nothing
 	l = Threads.ReentrantLock()
 	Threads.lock(l)
 	n = 0
 	try
 	    if isfile(opt_file_arrow)
-		try
-	                println("Skipping optimization runs. Arrow File already exists: $(opt_file_arrow)")
-        	        println(general_logger, "Skipping optimization runs. Arrow File already exists: $(opt_file_arrow)")
-                	opt_df = DataFrame(Arrow.Table(opt_file_arrow))
-	                println(general_logger, "Optimization data read successfully from arrow file.\n")
-        	        flush(general_logger)
-			n = nrow(opt_df)
-		catch exc1
-			println(general_logger, "Error reading arrow opt_df file: $(exc1)")
-			showerror(general_logger, exc1, catch_backtrace())
-		end
+			try
+	            println("Skipping optimization runs. Arrow File already exists: $(opt_file_arrow)")
+		        println(general_logger, "Skipping optimization runs. Arrow File already exists: $(opt_file_arrow)")
+	        	opt_df = DataFrame(Arrow.Table(opt_file_arrow))
+	            println(general_logger, "Optimization data read successfully from arrow file.\n")
+		        flush(general_logger)
+				flush(stdout)
+				n = nrow(opt_df)
+			catch exc1
+				println(general_logger, "Error reading arrow opt_df file: $(exc1)")
+				flush(general_logger)
+				showerror(general_logger, exc1, catch_backtrace())
+			end
 	    end
 	    if (n == 0) && isfile(opt_file_zip)  # v2.0 feature
 	        try
@@ -588,11 +613,14 @@ function obtain_robust_optimization_model_results(opt_output_path, test_name, mo
 	    	        end
 	        	close(r)
 	        	println(general_logger, "Optimization data read successfully from zip file.\n")
-			n = nrow(opt_df)
-		catch exc2
-			println(general_logger, "Error reading JLD/ZIP opt_df file: $(exc2)")
-                        showerror(general_logger, exc2, catch_backtrace())
-		end
+				flush(stdout)
+				flush(general_logger)
+				n = nrow(opt_df)
+			catch exc2
+				println(general_logger, "Error reading JLD/ZIP opt_df file: $(exc2)")
+	                        showerror(general_logger, exc2, catch_backtrace())
+				flush(general_logger)
+			end
 	    end
 	    if (n == 0) && isfile(opt_var_file)   # Check if optimization results are cached in file
                 println("Skipping optimization runs. File already exists: $(opt_var_file)")
@@ -608,7 +636,8 @@ function obtain_robust_optimization_model_results(opt_output_path, test_name, mo
                 end
                 println(general_logger, "Optimization data read successfully.\n")
                 flush(general_logger)
-		n = nrow(opt_df)
+				flush(stdout)
+				n = nrow(opt_df)
 	    end
 	catch exc
 		println(general_logger, "ERROR Unable to read existing model solution. Cause: $(exc)")
@@ -616,19 +645,20 @@ function obtain_robust_optimization_model_results(opt_output_path, test_name, mo
 	finally
 		if isnothing(opt_df) || (n == 0)
 			println(general_logger, "Existing robust model results NOT found. Invoking solver...")
-	        	output_file_inf_log = get_infeasible_log_path(solver_parameters)
-	        	infeasible_logger = open(output_file_inf_log, "a+")
-	        	opt_df = run_robust_optimization_models(model, instance_name, instance_as_dict, solver_parameters, general_logger, infeasible_logger)
-	        	close(infeasible_logger)
-	    	end
+        	output_file_inf_log = get_infeasible_log_path(solver_parameters)
+        	infeasible_logger = open(output_file_inf_log, "a+")
+        	opt_df = run_robust_optimization_models(model, instance_name, instance_as_dict, solver_parameters, general_logger, infeasible_logger)
+        	close(infeasible_logger)
+    	end
 		Threads.unlock(l)
 		flush(general_logger)
+		flush(stdout)
 	end
     return opt_df
 end
 
-function save_optimization_results_dataframe_to_file(opt_output_path, model, instance_name, opt_df, general_logger; reopt=false)
-    base_filename = get_optimization_result_base_filename(opt_output_path, model, instance_name)
+function save_optimization_results_dataframe_to_file(opt_output_path, model, instance_name, opt_df, general_logger, Gamma_perc = 0.0; reopt=false)
+    base_filename = get_optimization_result_base_filename(opt_output_path, model, instance_name, Gamma_perc)
 	if reopt
 		base_filename *= "_reopt"
 	end
